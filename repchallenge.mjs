@@ -104,6 +104,8 @@ export function createRepChallenge({ room, session, report, target = REPS_TARGET
   return {
     exercise,
     target,
+    /** Where the reps stand, for the coach to pick up after a reconnect. */
+    status() { return { kind: 'reps', exercise, words, started: Boolean(started), progress: progress(), target, finished }; },
     start() {
       if (started || target <= 0) return;
       // Never send Gemini a new request while it is still talking (greeting, walk celebration): wait for a quiet

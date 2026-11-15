@@ -24,6 +24,7 @@ import { placeCall } from './outbound.mjs';
 import { applyPenalty, CHARGEABLE } from './penalty.mjs';
 import { DEMO_MODE, describeChallenge, INACTIVE_STEPS, pickChallenge } from './challenge.mjs';
 import { walletInfo } from './solana.mjs';
+import { DataPacket_Kind, RoomServiceClient } from 'livekit-server-sdk';
 
 const PORT = Number(process.env.PORT || 3000);
 // Inactivity check-ins. DEMO_MODE=1: a 5-20 second delay, work hours ignored, first report of the day counts as inactive.
@@ -503,6 +504,16 @@ async function handleApi(req, res, url) {
     await updateDay(date, { started_at: new Date().toISOString() });
     log('day started', { date, ...activity.settings, staked: Boolean(body.stake) });
     return send(res, 200, { ok: true });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/debug/crash') {
+    // Testing: make the coach's Gemini session fail with the same fatal error seen in real calls, mid-call,
+    // to exercise auto-recovery. Sent as a LiveKit data message from the server (the coach ignores it from anyone else).
+    const cur = callInProgress ? [...day(date).attempts].reverse().find(a => a.status === 'calling') : null;
+    if (!cur?.room) return send(res, 409, { error: 'No call in progress.' });
+    const rs = new RoomServiceClient(process.env.LIVEKIT_URL.replace(/^ws/, 'http'), process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET);
+    await rs.sendData(cur.room, new TextEncoder().encode(JSON.stringify({ action: 'crash' })), DataPacket_Kind.RELIABLE, { topic: 'coach.debug' });
+    log('debug: forced coach crash', { attempt: cur.id });
+    return send(res, 200, { ok: true, attempt: cur.id });
   }
   if (req.method === 'POST' && url.pathname === '/api/trigger') {
     // Same path as the Shortcut, with force (skips the cooldown) and "no new steps" since the last report.

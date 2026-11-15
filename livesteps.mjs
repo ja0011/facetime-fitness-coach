@@ -147,8 +147,10 @@ export function startWalkChallenge({ session, callStart, room, onComplete, targe
     }
   }
 
-  if (!token) { log('walk: STEPS_TOKEN missing from .env.local; live steps disabled'); return () => {}; }
+  // status(): where the walk stands, for the coach to pick up after a reconnect.
+  const status = () => ({ kind: 'walk', progress: Math.max(0, lastReported), target, finished });
+  if (!token) { log('walk: STEPS_TOKEN missing from .env.local; live steps disabled'); return Object.assign(() => {}, { status }); }
   const loop = async () => { await tick(); if (!stopped) timer = setTimeout(loop, POLL_MS); };
   timer = setTimeout(loop, START_DELAY_MS);
-  return () => { stopped = true; clearTimeout(timer); };
+  return Object.assign(() => { stopped = true; clearTimeout(timer); }, { status });
 }

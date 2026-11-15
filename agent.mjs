@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { AutoSubscribe, defineAgent, voice } from '@livekit/agents';
 import { AgentDispatchClient } from 'livekit-server-sdk';
+import { TrackKind } from '@livekit/rtc-node';
 import { runAgent, usesOwnLiveKit } from './chert-rooms.mjs';
 import { greetOnBridgeReady } from './greet.mjs';
 import { GeminiVideoModel, streamCallerVideo } from './video.mjs';
@@ -104,22 +105,103 @@ const agent = defineAgent({
     // Gemini Live (reads GOOGLE_API_KEY from .env.local). GeminiVideoModel is the stock model plus a handle
     // on its live session, so video.mjs can push camera frames into it.
     const model = new GeminiVideoModel({ model: 'gemini-2.5-flash-native-audio-preview-12-2025', voice: 'Puck' });
-    const session = new voice.AgentSession({ llm: model });
-    ctx.addShutdownCallback(() => session.close());
-    await session.start({
-      room: ctx.room,
-      agent: new voice.Agent({ instructions: buildInstructions(plan) }),
-      record: false,
-      inputOptions: {
-        participantIdentity: caller.identity,
-        audioEnabled: true,
-        videoEnabled: true, // a no-op in Node agents 1.8.0; video.mjs does the real work
-        textEnabled: false,
-        closeOnDisconnect: true,
-        deleteRoomOnClose: false,
+
+    // ---- Auto-recovery: the Gemini Live session can die mid-call (e.g. "CONTENT_TYPE_AUDIO is not supported").
+    // Everything else talks to `coach`, a stable handle; when a session closes with an error while the caller is
+    // still on the line, a new session is started behind it and picks up where the challenge stands.
+    let session = null;
+    let ending = false;
+    let recoveries = 0;
+    const MAX_RECOVERIES = 3;
+    const rlog = (msg, extra = {}) => console.log(`[recover] ${msg}`, JSON.stringify(extra));
+    const coach = {
+      get agentState() { return session?.agentState ?? 'thinking'; }, // "not quiet" while reconnecting: trackers wait
+      get userState() { return session?.userState ?? 'listening'; },
+      generateReply(opts) {
+        if (!session) throw new Error('coach is reconnecting');
+        return session.generateReply(opts);
       },
-      outputOptions: { audioEnabled: true, transcriptionEnabled: false },
+    };
+    const callerHere = () => !ending && ctx.room.remoteParticipants.has(caller.identity);
+
+    async function startSession(note = '') {
+      const s = new voice.AgentSession({ llm: model });
+      s.on(voice.AgentSessionEventTypes.Close, ev => void onSessionClosed(s, ev));
+      await s.start({
+        room: ctx.room,
+        agent: new voice.Agent({ instructions: buildInstructions(plan) + note }),
+        record: false,
+        inputOptions: {
+          participantIdentity: caller.identity,
+          audioEnabled: true,
+          videoEnabled: true, // a no-op in Node agents 1.8.0; video.mjs does the real work
+          textEnabled: false,
+          closeOnDisconnect: true,
+          deleteRoomOnClose: false,
+        },
+        outputOptions: { audioEnabled: true, transcriptionEnabled: false },
+      });
+      session = s;
+      return s;
+    }
+
+    async function onSessionClosed(s, ev) {
+      if (s !== session) return;
+      session = null;
+      const reason = ev?.reason;
+      // Only an error mid-call is recovered; a hang-up (participant_disconnected) or job shutdown is the real end.
+      if (ending || reason !== 'error' || !callerHere()) { rlog('session closed, not recovering', { reason, caller_here: callerHere() }); return; }
+      if (recoveries >= MAX_RECOVERIES) { rlog('giving up: too many reconnects this call', { recoveries }); return; }
+      recoveries += 1;
+      rlog('session died mid-call, reconnecting', { attempt: recoveries, error: ev?.error?.error?.message ?? ev?.error?.message ?? null });
+      const started = Date.now();
+      for (let tryNo = 1; tryNo <= 3 && callerHere(); tryNo++) {
+        await new Promise(r => setTimeout(r, tryNo === 1 ? 600 : 1500));
+        if (!callerHere()) return;
+        try {
+          // The dead session leaves its audio track published. Chert's Mac needs exactly ONE unmuted audio track
+          // from the agent, so remove the old one(s) before the new session publishes its own.
+          for (const pub of [...ctx.room.localParticipant.trackPublications.values()]) {
+            if (pub.kind === TrackKind.KIND_AUDIO && pub.sid) {
+              await ctx.room.localParticipant.unpublishTrack(pub.sid).catch(err => rlog('unpublish failed', { error: err.message }));
+              rlog('removed stale audio track', { sid: pub.sid });
+            }
+          }
+          const where = progressText();
+          await startSession(`\n\nIMPORTANT: your connection dropped for a moment and you are back mid-call. Do not greet again or restart the challenge. Progress right now: ${where}.`);
+          session.generateReply({ instructions: `Say "Sorry, I'm back!" and then in one short sentence: ${where}. Tell them to keep going. Use exactly these numbers.` });
+          rlog('reconnected', { attempt: recoveries, ms: Date.now() - started, progress: where });
+          return;
+        } catch (err) {
+          rlog('reconnect try failed', { try: tryNo, error: err.message });
+        }
+      }
+    }
+
+    // What to tell the reconnected coach, from the live trackers.
+    function progressText() {
+      const w = stopWalk.status?.();
+      const r = reps.status();
+      if (plan.walk > 0 && w && !w.finished) return `the caller has walked ${w.progress} of ${w.target} steps`;
+      if (plan.reps > 0 && r.started && !r.finished) return `the caller has done ${r.progress} of ${r.target} ${r.words}`;
+      if (plan.reps > 0 && !r.started) return `the walk is done; next is ${r.target} ${r.words}`;
+      return `the challenge (${describeChallenge(plan)}) is complete; wrap up warmly`;
+    }
+
+    ctx.addShutdownCallback(async () => { ending = true; await session?.close(); });
+    await startSession();
+
+    // Testing hook: POST /api/debug/crash on the step server sends this data message to force the exact
+    // fatal error Gemini raised in real calls. Accepted only from the server (not from Chert's bridge or the pose worker).
+    ctx.room.on('dataReceived', (payload, participant, _kind, topic) => {
+      if (topic !== 'coach.debug' || participant) return;
+      let msg; try { msg = JSON.parse(new TextDecoder().decode(payload)); } catch { return; }
+      if (msg.action === 'crash' && model.liveSession) {
+        rlog('forced test crash requested');
+        model.liveSession.emitError(new Error('Forced test crash (debug)'), false);
+      }
     });
+
     // Greet once when chert dev reports that FaceTime is ready (bridge_ready in the
     // room metadata): the Mac ends the call if it hears nothing within 10 seconds
     // of that. Participant arrival alone is not readiness, so there is no greeting
@@ -129,7 +211,7 @@ const agent = defineAgent({
     // Rep counts start arriving as soon as the pose counter joins; the challenge itself starts after the walk.
     const reps = createRepChallenge({
       room: ctx.room,
-      session,
+      session: coach,
       report: r => reportProgress({ room: ctx.room.name, reps: r }),
       target: plan.reps,
       exercise: plan.exercise,
@@ -138,7 +220,7 @@ const agent = defineAgent({
     // The walking challenge starts with the call itself (bridge_ready), not with the waiting room.
     let stopWalk = () => {};
     const stopGreeting = greetOnBridgeReady(ctx.room, () => {
-      session.generateReply({ instructions: buildGreeting(plan) });
+      coach.generateReply({ instructions: buildGreeting(plan) });
       if (plan.walk <= 0) {
         // No walk in this challenge: go straight to the reps. start() also waits until the coach is quiet.
         const t = setTimeout(() => reps.start(), 4000);
@@ -146,7 +228,7 @@ const agent = defineAgent({
         return;
       }
       stopWalk = startWalkChallenge({
-        session,
+        session: coach,
         callStart: Date.now(),
         room: ctx.room.name,
         target: plan.walk,

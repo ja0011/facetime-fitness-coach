@@ -276,6 +276,7 @@
     <div id="d-walk" hidden><div class="small muted" id="d-walk-txt"></div><div class="bar"><span id="d-walk-bar"></span></div></div>
     <div id="d-reps" hidden><div class="small muted" id="d-reps-txt"></div><div class="bar"><span id="d-reps-bar"></span></div></div>
     <p class="error" id="trigger-error"></p>
+    <button class="btn secondary" id="crash" disabled title="Kills the coach's Gemini session mid-call to test auto-recovery">Simulate coach crash</button>
   </section>
   <section class="card">
     <h3>Pose view</h3>
@@ -484,6 +485,7 @@ function renderDebug(d) {
   $('d-status').textContent = cur ? `call: ${cur.status_detail}` : d.next_call ? 'scheduled' : d.cooldown_until ? 'cooldown' : 'idle';
   $('d-status').className = 'pill ' + (cur ? 'good' : d.next_call ? 'warn' : '');
   $('trigger').disabled = Boolean(cur || d.next_call);
+  $('crash').disabled = !cur;
   $('d-next').textContent = d.next_call ? `Challenge: ${d.next_call.challenge}` : d.cooldown_until && !cur ? `Cooldown until ${clock(d.cooldown_until)} (the button skips it)` : '';
   $('d-challenge').textContent = cur?.challenge_text ?? (d.next_call ? `${d.next_call.challenge} (next)` : '—');
   const fresh = d.live_steps && d.live_steps.age_ms < 10000;
@@ -508,6 +510,12 @@ $('trigger').onclick = async () => {
   if (!r.ok && r.status !== 202) $('trigger-error').textContent = j.error || j.status;
   else if (j.status && j.status !== 'scheduled') $('trigger-error').textContent = `Not scheduled: ${j.status}`;
   poll();
+};
+
+$('crash').onclick = async () => {
+  const r = await api('/api/debug/crash', { method: 'POST', body: '{}' });
+  const j = await r.json();
+  $('trigger-error').textContent = r.ok ? 'Crash sent: the coach should say "Sorry, I’m back!" in a few seconds.' : j.error;
 };
 
 // ---------- tabs ----------
