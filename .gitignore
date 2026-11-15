@@ -28,3 +28,10 @@ xcuserdata/
 pose/.venv/
 pose/models/
 __pycache__/
+
+# Promo video build output (rebuild with promo/build/render.mjs)
+promo/build/frames/
+promo/build/chrome-profile-*/
+promo/build/audio.wav
+promo/build/vo/
+promo/*.mp4

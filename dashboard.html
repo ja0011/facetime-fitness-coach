@@ -29,9 +29,6 @@
   header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 16px; padding: 12px 24px; background: color-mix(in srgb, var(--card) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
   .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.01em; }
   .logo { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, var(--accent), #7b5cff); display: grid; place-items: center; color: #fff; font-size: 14px; }
-  .tabs { display: flex; gap: 2px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
-  .tabs button { border: 0; background: transparent; padding: 5px 12px; border-radius: 7px; color: var(--muted); font-size: 13px; font-weight: 600; }
-  .tabs button[aria-selected="true"] { background: var(--card); color: var(--ink); box-shadow: var(--shadow); }
   .spacer { flex: 1; }
   .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
   .conn i { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
@@ -121,10 +118,7 @@
   .kv dt { color: var(--muted); } .kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 
-  /* debug tab (unchanged look: dense cards) */
-  .debug { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 16px; padding: 20px 24px 32px; max-width: 1440px; margin: 0 auto; }
-  @media (max-width: 900px) { .debug { grid-template-columns: 1fr; } }
-  .debug .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+ font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
   .pill { display: inline-flex; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--line); color: var(--muted); }
   .pill.good { background: var(--good-soft); color: var(--good); } .pill.warn { background: var(--warn-soft); color: var(--warn); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
@@ -155,17 +149,13 @@
 
 <header>
   <div class="brand"><span class="logo">↑</span> Desk Break <span id="demo-badge" class="badge" hidden>Demo</span></div>
-  <nav class="tabs" role="tablist" aria-label="Views">
-    <button role="tab" id="tab-day" aria-selected="true">My day</button>
-    <button role="tab" id="tab-live" aria-selected="false">Live &amp; debug</button>
-  </nav>
   <span class="spacer"></span>
   <span class="conn" id="conn"><i></i><span>connecting</span></span>
   <button class="link" id="logout">Sign out</button>
 </header>
 
 <!-- ============ MY DAY ============ -->
-<div class="day" data-tab="day">
+<div class="day">
 
   <!-- Setup: shown until the day is started -->
   <section class="card" id="setup" hidden>
@@ -216,7 +206,6 @@
   <section class="card" id="stake-card" hidden>
     <div class="stake-head">
       <div><p class="eyebrow">Money on the line</p><div class="stake-big" id="k-lost"></div></div>
-      <div class="small muted" id="k-rule" style="text-align:right"></div>
     </div>
     <p class="sub small" style="margin-top:8px" id="k-note"></p>
   </section>
@@ -255,33 +244,6 @@
   <section class="card" id="timeline-card" hidden>
     <h3>History</h3>
     <ul class="timeline" id="timeline"></ul>
-  </section>
-</div>
-
-<!-- ============ LIVE & DEBUG ============ -->
-<div class="debug" data-tab="live" hidden>
-  <section class="card">
-    <h3>Live</h3>
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
-      <span id="d-status" class="pill">idle</span>
-      <button class="btn" id="trigger" style="padding:9px 14px">Trigger random check-in</button>
-    </div>
-    <p class="small muted" style="margin:14px 0 0">Next check-in</p>
-    <div class="big" id="d-countdown">—</div>
-    <p class="small muted" style="margin:0" id="d-next"></p>
-    <div class="grid2">
-      <div class="stat"><span>Challenge</span><b id="d-challenge">—</b></div>
-      <div class="stat"><span>StepStream</span><b id="d-steps">—</b><span id="d-steps-age"></span></div>
-    </div>
-    <div id="d-walk" hidden><div class="small muted" id="d-walk-txt"></div><div class="bar"><span id="d-walk-bar"></span></div></div>
-    <div id="d-reps" hidden><div class="small muted" id="d-reps-txt"></div><div class="bar"><span id="d-reps-bar"></span></div></div>
-    <p class="error" id="trigger-error"></p>
-    <button class="btn secondary" id="crash" disabled title="Kills the coach's Gemini session mid-call to test auto-recovery">Simulate coach crash</button>
-  </section>
-  <section class="card">
-    <h3>Pose view</h3>
-    <div class="pose"><img id="pose-img" alt="What the rep counter sees" hidden><div class="placeholder" id="pose-ph">The MediaPipe view appears here during a call.</div></div>
-    <p class="small muted" style="margin:8px 0 0">Skeleton and counter state, refreshed every second.</p>
   </section>
 </div>
 
@@ -326,7 +288,7 @@ function chipPicker(el, values, value, unit, onPick) {
   el.querySelectorAll('.chip').forEach(b => b.onclick = () => { el.querySelectorAll('.chip').forEach(x => x.setAttribute('aria-pressed', String(x === b))); onPick(+b.dataset.v); });
 }
 const stakeSentence = (penalty, charity, balance) =>
-  `Every missed or unfinished check-in today donates <b>${penalty} SOL</b>${charity ? ` to <a href="${addr(charity)}" target="_blank" rel="noopener">charity</a>` : ' to charity'}. There’s no daily limit, so every miss counts.`
+  `Every missed or unfinished check-in today donates <b>${penalty} SOL</b>${charity ? ` to <a href="${addr(charity)}" target="_blank" rel="noopener">charity</a>` : ' to charity'}.`
   + (balance != null ? ` <span class="muted">(Your wallet holds ${sol(balance)} SOL.)</span>` : '');
 
 // ---------- setup form (before the day starts) ----------
@@ -419,7 +381,7 @@ function renderDay(d) {
     const locked = d.stake.committed;
     $('s-stake-switch').hidden = locked; if (locked) $('s-stake').hidden = true;
     $('s-stake-locked').hidden = !locked;
-    if (locked) $('s-stake-locked').innerHTML = `<b>Already committed today:</b> ${sol(d.stake.penalty_sol)} SOL donated per missed check-in, no daily limit.`;
+    if (locked) $('s-stake-locked').innerHTML = `<b>Already committed today:</b> ${sol(d.stake.penalty_sol)} SOL donated per missed check-in.`;
     return;
   }
 
@@ -459,7 +421,6 @@ function renderDay(d) {
   if (st.committed) {
     $('late-stake').hidden = true;
     $('k-lost').textContent = st.lost_sol > 0 ? `${sol(st.lost_sol)} SOL donated today` : 'Nothing donated yet';
-    $('k-rule').innerHTML = `${sol(st.penalty_sol)} SOL per missed check-in<br>No daily limit · locked for today`;
     $('k-note').textContent = st.charged_count ? `${st.charged_count} missed or unfinished check-in${st.charged_count === 1 ? '' : 's'} since you committed at ${clock(st.committed_at)}.` : `Committed at ${clock(st.committed_at)}. Answer every check-in and nothing is donated.`;
   }
 
@@ -479,58 +440,7 @@ function renderDay(d) {
   }
 }
 
-// ---------- the debug view ----------
-function renderDebug(d) {
-  const cur = d.current;
-  $('d-status').textContent = cur ? `call: ${cur.status_detail}` : d.next_call ? 'scheduled' : d.cooldown_until ? 'cooldown' : 'idle';
-  $('d-status').className = 'pill ' + (cur ? 'good' : d.next_call ? 'warn' : '');
-  $('trigger').disabled = Boolean(cur || d.next_call);
-  $('crash').disabled = !cur;
-  $('d-next').textContent = d.next_call ? `Challenge: ${d.next_call.challenge}` : d.cooldown_until && !cur ? `Cooldown until ${clock(d.cooldown_until)} (the button skips it)` : '';
-  $('d-challenge').textContent = cur?.challenge_text ?? (d.next_call ? `${d.next_call.challenge} (next)` : '—');
-  const fresh = d.live_steps && d.live_steps.age_ms < 10000;
-  $('d-steps').textContent = fresh ? d.live_steps.steps : '—';
-  $('d-steps-age').textContent = fresh ? ' steps this session' : d.live_steps ? ` last seen ${Math.round(d.live_steps.age_ms / 1000)} s ago` : ' not sending';
-  const ch = cur?.challenge;
-  $('d-walk').hidden = !(ch && ch.walk > 0);
-  if (ch && ch.walk > 0) { const p = cur.walk?.progress ?? 0; $('d-walk-txt').textContent = `Walk ${p} / ${ch.walk}`; $('d-walk-bar').style.width = pct(p, ch.walk) + '%'; }
-  $('d-reps').hidden = !(ch && ch.reps > 0);
-  if (ch && ch.reps > 0) { const p = cur.reps?.progress ?? 0; $('d-reps-txt').textContent = `Reps ${p} / ${ch.reps}`; $('d-reps-bar').style.width = pct(p, ch.reps) + '%'; }
-}
-function tickCountdown() {
-  const d = state;
-  if (!d || !d.next_call) { $('d-countdown').textContent = d?.current ? 'in call' : '—'; return; }
-  const s = Math.max(0, Math.ceil((Date.parse(d.next_call.at) - (Date.now() + clockSkew)) / 1000));
-  $('d-countdown').textContent = s >= 60 ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : `${s}s`;
-}
-$('trigger').onclick = async () => {
-  $('trigger-error').textContent = ''; $('trigger').disabled = true;
-  const r = await api('/api/trigger', { method: 'POST', body: '{}' });
-  const j = await r.json();
-  if (!r.ok && r.status !== 202) $('trigger-error').textContent = j.error || j.status;
-  else if (j.status && j.status !== 'scheduled') $('trigger-error').textContent = `Not scheduled: ${j.status}`;
-  poll();
-};
-
-$('crash').onclick = async () => {
-  const r = await api('/api/debug/crash', { method: 'POST', body: '{}' });
-  const j = await r.json();
-  $('trigger-error').textContent = r.ok ? 'Crash sent: the coach should say "Sorry, I’m back!" in a few seconds.' : j.error;
-};
-
-// ---------- tabs ----------
-let tab = 'day';
-try { tab = localStorage.getItem('deskcoach.tab') === 'live' ? 'live' : 'day'; } catch {}
-function showTab(t) {
-  tab = t;
-  document.querySelectorAll('[data-tab]').forEach(el => { el.hidden = el.dataset.tab !== t; });
-  $('tab-day').setAttribute('aria-selected', String(t === 'day')); $('tab-live').setAttribute('aria-selected', String(t === 'live'));
-  try { localStorage.setItem('deskcoach.tab', t); } catch {}
-  if (t === 'live') pollPose();
-}
-$('tab-day').onclick = () => showTab('day'); $('tab-live').onclick = () => showTab('live');
-
-// ---------- polling ----------
+// ---------- polling ----------// ---------- polling ----------
 let state = null, clockSkew = 0;
 async function poll() {
   if (!token) return;
@@ -540,24 +450,11 @@ async function poll() {
     const d = await r.json();
     state = d; clockSkew = Date.parse(d.now) - Date.now();
     $('demo-badge').hidden = !d.demo_mode;
-    renderDay(d); renderDebug(d);
+    renderDay(d);
     $('conn').className = 'conn ok'; $('conn').lastElementChild.textContent = 'live';
   } catch (e) { if (e.message !== 'unauthorized') { $('conn').className = 'conn off'; $('conn').lastElementChild.textContent = 'offline'; } }
 }
-let poseUrl = null;
-async function pollPose() {
-  if (tab !== 'live') return; // camera frames are only fetched on the debug tab
-  if (!token || !state?.calling) { $('pose-img').hidden = true; $('pose-ph').hidden = false; return; }
-  try {
-    const r = await api('/api/pose.jpg');
-    if (r.status !== 200) return;
-    const url = URL.createObjectURL(await r.blob());
-    $('pose-img').src = url; $('pose-img').hidden = false; $('pose-ph').hidden = true;
-    if (poseUrl) URL.revokeObjectURL(poseUrl); poseUrl = url;
-  } catch {}
-}
-setInterval(poll, 1500); setInterval(pollPose, 1000); setInterval(tickCountdown, 250);
-showTab(tab);
+setInterval(poll, 1500);setInterval(poll, 1500);
 if (token) poll(); else showLogin();
 </script>
 </body>
