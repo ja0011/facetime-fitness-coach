@@ -1,50 +1,111 @@
 // Step-count server: the Apple Shortcut posts today's steps here; if they are under the goal, Chert FaceTimes you.
 //
-//   POST /steps   { "steps": 4210, "date": "2026-11-15" }   Authorization: Bearer <STEPS_TOKEN>
-//   GET  /status  today's record (or ?date=YYYY-MM-DD)       Authorization: Bearer <STEPS_TOKEN>
-//   POST /live-steps { "session_id", "steps", "started_at" }  live count from the StepStream iPhone app (~every 3 s)
-//   GET  /live-steps  latest live count, read by the coach agent during a call
-//   POST /penalty { "date": "2026-11-15" }  retry a missed day's penalty (never pays twice)
-//   GET  /health  no auth, for checking the server is reachable from the phone
+//   POST /steps          { "steps": 4210, "date"?: "2026-11-15", "force"?: true }   force skips the cooldown (demos)
+//   GET  /status         today's steps and every call attempt (or ?date=YYYY-MM-DD)
+//   POST /live-steps     { session_id, steps, started_at }   live count from the StepStream iPhone app (~every 3 s)
+//   GET  /live-steps     latest live count, read by the coach agent during a call
+//   POST /walk-progress  { room, progress, target, completed }   the coach agent's walk progress for the current call
+//   POST /penalty        { "date"?, "attempt_id"? }   retry unpaid penalties (never pays twice for one call)
+//   GET  /health         no auth, for checking the server is reachable from the phone
+// All routes except /health need Authorization: Bearer <STEPS_TOKEN>.
 //
-// Every result is saved in data/days.json (one record per date) so the penalty step can read it later.
+// data/days.json: { "2026-11-15": { steps, goal, attempts: [ { id, call_id, outcome, walk, penalty, notify, ... } ] } }
+// Outcomes: answered (walk completed) | failed (answered, walk not completed) | missed (rang, not answered)
+//           | error (never rang: busy line, setup failure). Only missed and failed are charged.
 import { createServer } from 'node:http';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { placeCall } from './outbound.mjs';
-import { applyPenalty } from './penalty.mjs';
+import { applyPenalty, CHARGEABLE } from './penalty.mjs';
 
 const PORT = Number(process.env.PORT || 3000);
 const STEP_GOAL = Number(process.env.STEP_GOAL || 8000);
 const TOKEN = process.env.STEPS_TOKEN;
-const STATE_FILE = new URL('./data/days.json', import.meta.url);
+const CALL_COOLDOWN_MS = 60_000 * Number(process.env.CALL_COOLDOWN_MIN ?? 30);
+// Optional daily cap on calls that reach the phone. Unset or 0 = no limit.
+const MAX_CALLS_PER_DAY = Number(process.env.MAX_CALLS_PER_DAY || 0) || Infinity;
+const maxLabel = Number.isFinite(MAX_CALLS_PER_DAY) ? MAX_CALLS_PER_DAY : 'unlimited';
+// A shared line is often busy with another team's call. Each try already waits up to 2 minutes in Chert's queue;
+// if the line is still busy, try again every minute, up to BUSY_RETRIES times.
+const BUSY_RETRIES = Number(process.env.BUSY_RETRIES ?? 8);
+const BUSY_RETRY_DELAY_MS = 60_000;
+// After the call ends, wait this long for the agent's last walk report before deciding answered vs failed.
+const WALK_REPORT_GRACE_MS = 4000;
+// DATA_DIR lets a test run use a throwaway folder instead of ./data.
+const DATA_DIR = process.env.DATA_DIR ? pathToFileURL(process.env.DATA_DIR.replace(/\/?$/, '/')) : new URL('./data/', import.meta.url);
+const STATE_FILE = new URL('days.json', DATA_DIR);
 
 if (!TOKEN || TOKEN.length < 16) {
   console.error('STEPS_TOKEN (16+ characters) is missing from .env.local. The server is reachable on your network, so it needs one.');
   process.exit(1);
 }
 
-// ---- state: { "2026-11-15": { steps, goal, status, outcome, call_id, ... } } ----
+// ---- state ----
+const CALL_FIELDS = ['status', 'status_detail', 'outcome', 'call_id', 'error', 'terminal_reason', 'answered_at', 'ended_at', 'penalty', 'notify', 'penalty_error'];
+
+/** Older days.json kept one call per day at the top level; move it into attempts[0] so nothing is lost. */
+function migrate(days) {
+  for (const [date, rec] of Object.entries(days)) {
+    if (rec.attempts) continue;
+    rec.attempts = [];
+    if (rec.outcome || rec.call_id || rec.penalty) {
+      const legacy = { id: `legacy-${date}` };
+      for (const f of CALL_FIELDS) if (f in rec) legacy[f] = rec[f];
+      legacy.status = 'done';
+      rec.attempts.push(legacy);
+    }
+    for (const f of CALL_FIELDS) delete rec[f];
+  }
+  return days;
+}
 async function loadDays() {
-  try { return JSON.parse(await readFile(STATE_FILE, 'utf8')); } catch { return {}; }
+  try { return migrate(JSON.parse(await readFile(STATE_FILE, 'utf8'))); } catch { return {}; }
 }
 let days = await loadDays();
-async function saveDays() {
-  await mkdir(new URL('./data/', import.meta.url), { recursive: true });
-  const tmp = new URL('./data/days.json.tmp', import.meta.url);
-  await writeFile(tmp, JSON.stringify(days, null, 2));
-  await rename(tmp, STATE_FILE); // atomic: a crash never leaves half a file
+let saving = Promise.resolve();
+function saveDays() {
+  // Serialize writes so two quick updates can't interleave.
+  saving = saving.then(async () => {
+    await mkdir(DATA_DIR, { recursive: true });
+    const tmp = new URL('days.json.tmp', DATA_DIR);
+    await writeFile(tmp, JSON.stringify(days, null, 2));
+    await rename(tmp, STATE_FILE); // atomic: a crash never leaves half a file
+  });
+  return saving;
 }
-async function update(date, fields) {
-  days[date] = { ...days[date], ...fields, updated_at: new Date().toISOString() };
+function day(date) {
+  days[date] ??= { attempts: [] };
+  return days[date];
+}
+async function updateDay(date, fields) {
+  Object.assign(day(date), fields, { updated_at: new Date().toISOString() });
   await saveDays();
   return days[date];
 }
+const findAttempt = (date, id) => day(date).attempts.find(a => a.id === id);
+async function updateAttempt(date, id, fields) {
+  const a = findAttempt(date, id);
+  Object.assign(a, fields, { updated_at: new Date().toISOString() });
+  await saveDays();
+  return a;
+}
+
+/** Attempts that actually reached the phone count toward the daily max and the cooldown; errors do not. */
+const reachedPhone = a => ['answered', 'failed', 'missed'].includes(a.outcome);
+function callBudget(date) {
+  const reached = day(date).attempts.filter(reachedPhone);
+  const last = reached.at(-1);
+  const lastAt = last ? Date.parse(last.ended_at || last.answered_at || last.started_at) : 0;
+  const cooldownUntil = last ? lastAt + CALL_COOLDOWN_MS : 0;
+  return { callsToday: reached.length, cooldownUntil: cooldownUntil > Date.now() ? new Date(cooldownUntil).toISOString() : null };
+}
 
 let callInProgress = null; // one line answers one call at a time
+const roomToAttempt = new Map(); // LiveKit room -> { date, id }, so the agent's walk reports land on the right call
+
 // Latest live count from StepStream. In memory only: it matters during a call, not afterwards.
 let live = null; // { session_id, steps, started_at, updated_at, date }
-
 function handleLiveSteps(body) {
   const steps = Number(body.steps);
   const sessionId = typeof body.session_id === 'string' ? body.session_id.slice(0, 64) : '';
@@ -55,18 +116,31 @@ function handleLiveSteps(body) {
   live = { session_id: sessionId, steps: same ? Math.max(live.steps, steps) : steps, started_at: same ? live.started_at : startedAt, updated_at: new Date().toISOString(), date: localDate() };
   return { status: 200, body: { ok: true, steps: live.steps } };
 }
-const penaltyRuns = new Map(); // date -> promise, so two triggers for one day never run at once
 
-/** Runs (or joins) the penalty for one day. Only "missed" days are charged; see penalty.mjs. */
-function runPenalty(date) {
-  if (!penaltyRuns.has(date)) {
-    const run = applyPenalty(date, d => days[d], update)
-      .then(r => { log('penalty', { date, penalty: r.penalty?.status, signature: r.penalty?.signature, notify: r.notify?.status, notify_error: r.notify?.error, skipped: r.skipped, error: r.penalty?.error }); return r; })
-      .catch(async err => { log('penalty error', { date, error: err.message }); await update(date, { penalty_error: err.message }); return { error: err.message }; })
-      .finally(() => penaltyRuns.delete(date));
-    penaltyRuns.set(date, run);
+async function handleWalkProgress(body) {
+  const ref = typeof body.room === 'string' && roomToAttempt.get(body.room);
+  // Inbound calls through chert dev have no attempt here: that's fine, nothing to record.
+  if (!ref) return { status: 404, body: { error: 'unknown_room' } };
+  const progress = Math.max(0, Math.floor(Number(body.progress) || 0));
+  const target = Math.max(1, Math.floor(Number(body.target) || 0));
+  const prev = findAttempt(ref.date, ref.id)?.walk;
+  const completed = Boolean(prev?.completed) || body.completed === true || progress >= target; // never goes back to false
+  await updateAttempt(ref.date, ref.id, { walk: { target, progress: Math.max(progress, prev?.progress ?? 0), completed, updated_at: new Date().toISOString() } });
+  return { status: 200, body: { ok: true } };
+}
+
+const penaltyRuns = new Map(); // attempt id -> promise, so two triggers for one call never run at once
+
+/** Runs (or joins) the penalty for one attempt. Only missed/failed attempts are charged; see penalty.mjs. */
+function runPenalty(date, id) {
+  if (!penaltyRuns.has(id)) {
+    const run = applyPenalty({ date, attempt: findAttempt(date, id), get: () => findAttempt(date, id), save: f => updateAttempt(date, id, f) })
+      .then(r => { log('penalty', { date, attempt: id, penalty: r.penalty?.status, signature: r.penalty?.signature, notify: r.notify?.status, notify_error: r.notify?.error, skipped: r.skipped, error: r.penalty?.error }); return r; })
+      .catch(async err => { log('penalty error', { date, attempt: id, error: err.message }); await updateAttempt(date, id, { penalty_error: err.message }); return { error: err.message }; })
+      .finally(() => penaltyRuns.delete(id));
+    penaltyRuns.set(id, run);
   }
-  return penaltyRuns.get(date);
+  return penaltyRuns.get(id);
 }
 
 // ---- helpers ----
@@ -87,22 +161,48 @@ async function readJson(req) {
 }
 const log = (msg, extra = {}) => console.log(JSON.stringify({ at: new Date().toISOString(), msg, ...extra }));
 
-// ---- the accountability call, run in the background so the Shortcut gets an answer at once ----
-async function runCall(date) {
-  await update(date, { status: 'calling', outcome: null, call_id: null, error: null });
-  try {
-    const result = await placeCall({
-      video: true,
-      onEvent: e => { if (e.type === 'call_created') { update(date, { call_id: e.call_id }); log('call created', { date, call_id: e.call_id }); } },
-    });
-    log('call finished', { date, outcome: result.outcome, call_id: result.call_id, terminal_reason: result.terminal_reason });
-    const record = await update(date, { status: 'done', ...result });
-    if (result.outcome === 'missed') await runPenalty(date);
-    return record;
-  } catch (err) {
-    // Never got as far as ringing the phone: outcome "error", no penalty.
-    log('call error', { date, error: err.message });
-    return await update(date, { status: 'done', outcome: 'error', error: err.message });
+// ---- one accountability call attempt, run in the background so the Shortcut gets an answer at once ----
+async function runCall(date, id) {
+  const set = fields => updateAttempt(date, id, fields);
+  for (let tryNo = 0; ; tryNo++) {
+    try {
+      const result = await placeCall({
+        video: true,
+        onEvent: e => {
+          if (e.type === 'room_ready') { roomToAttempt.set(e.room, { date, id }); set({ room: e.room }); }
+          if (e.type === 'call_created') { set({ call_id: e.call_id, status_detail: 'dialing' }); log('call created', { date, attempt: id, call_id: e.call_id }); }
+          if (e.type === 'answered') set({ status_detail: 'in call' });
+          if (e.type === 'line_busy_queued') { set({ status_detail: `line busy, waiting in queue (try ${tryNo + 1})` }); log('line busy, queued', { date, attempt: id, queue_id: e.queue_id }); }
+          if (e.type === 'line_free') log('line free, dialing', { date, attempt: id });
+        },
+      });
+
+      // Answered is not enough: the walk target must have been reached before the call ended.
+      let outcome = result.outcome;
+      let walk = findAttempt(date, id).walk;
+      if (outcome === 'answered') {
+        if (!walk?.completed) { await new Promise(r => setTimeout(r, WALK_REPORT_GRACE_MS)); walk = findAttempt(date, id).walk; }
+        if (!walk?.completed) outcome = 'failed';
+      }
+      log('call finished', { date, attempt: id, outcome, call_id: result.call_id, terminal_reason: result.terminal_reason, walk_progress: walk?.progress ?? 0, walk_target: walk?.target ?? null });
+      const attempt = await set({ status: 'done', status_detail: null, ...result, outcome, walk: walk ?? { progress: 0, completed: false } });
+      if (CHARGEABLE.has(outcome)) await runPenalty(date, id);
+      return attempt;
+    } catch (err) {
+      if (err.code === 'line_busy' && tryNo < BUSY_RETRIES) {
+        const next = new Date(Date.now() + BUSY_RETRY_DELAY_MS);
+        log('line still busy, will retry', { date, attempt: id, retry: tryNo + 1, of: BUSY_RETRIES, at: next.toISOString() });
+        await set({ status_detail: `line busy (another team); retry ${tryNo + 1} of ${BUSY_RETRIES} at ${next.toLocaleTimeString()}` });
+        await new Promise(r => setTimeout(r, BUSY_RETRY_DELAY_MS));
+        continue;
+      }
+      // Never got as far as ringing the phone: outcome "error", no penalty.
+      log('call error', { date, attempt: id, error: err.message });
+      return await set({ status: 'done', status_detail: null, outcome: 'error', error: err.message });
+    } finally {
+      const room = findAttempt(date, id)?.room;
+      if (room) setTimeout(() => roomToAttempt.delete(room), 60_000);
+    }
   }
 }
 
@@ -113,28 +213,32 @@ async function handleSteps(req, res) {
   const steps = Number(body.steps);
   if (!Number.isFinite(steps) || steps < 0) return send(res, 400, { error: 'steps must be a non-negative number' });
   const date = /^\d{4}-\d{2}-\d{2}$/.test(body.date || '') ? body.date : localDate();
-  const force = body.force === true; // for testing: allow another call on the same day
+  const force = body.force === true; // demos: skip the cooldown (the daily max still applies)
   const goal = STEP_GOAL;
-  const prev = days[date];
 
   log('steps received', { date, steps, goal });
+  await updateDay(date, { steps, goal });
+  if (steps >= goal) return send(res, 200, { status: 'goal_met', date, steps, goal });
 
-  if (steps >= goal) {
-    await update(date, { steps, goal, status: prev?.status === 'done' ? prev.status : 'goal_met' });
-    return send(res, 200, { status: 'goal_met', date, steps, goal });
-  }
-
-  // Under goal. One accountability call per day: don't call again after an answered or missed call,
-  // but do retry after an "error" (that wasn't the person's fault).
   if (callInProgress) return send(res, 409, { status: 'call_in_progress', date, steps, goal });
-  if (!force && prev?.status === 'done' && prev.outcome !== 'error') {
-    await update(date, { steps });
-    return send(res, 200, { status: 'already_called', date, steps, goal, outcome: prev.outcome });
-  }
+  const { callsToday, cooldownUntil } = callBudget(date);
+  if (callsToday >= MAX_CALLS_PER_DAY) return send(res, 200, { status: 'daily_max_reached', date, steps, goal, calls_today: callsToday, max: maxLabel });
+  if (cooldownUntil && !force) return send(res, 200, { status: 'cooldown', date, steps, goal, next_call_after: cooldownUntil });
 
-  await update(date, { steps, goal });
-  callInProgress = runCall(date).finally(() => { callInProgress = null; });
-  return send(res, 202, { status: 'calling', date, steps, goal, short_by: goal - steps });
+  const attempt = { id: `a-${Date.now()}-${randomUUID().slice(0, 6)}`, started_at: new Date().toISOString(), steps_at_trigger: steps, forced: force, status: 'calling' };
+  day(date).attempts.push(attempt);
+  await saveDays();
+  callInProgress = runCall(date, attempt.id).finally(() => { callInProgress = null; });
+  return send(res, 202, { status: 'calling', date, steps, goal, short_by: goal - steps, attempt_id: attempt.id, calls_today: callsToday + 1, max: maxLabel });
+}
+
+async function handlePenaltyRetry(body) {
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(body.date || '') ? body.date : localDate();
+  const targets = day(date).attempts.filter(a =>
+    CHARGEABLE.has(a.outcome) && (!body.attempt_id || a.id === body.attempt_id) &&
+    (a.penalty?.status !== 'confirmed' || a.notify?.status !== 'sent'));
+  for (const a of targets) await runPenalty(date, a.id);
+  return { date, retried: targets.map(a => a.id), attempts: day(date).attempts.filter(a => CHARGEABLE.has(a.outcome)).map(a => ({ id: a.id, outcome: a.outcome, penalty: a.penalty?.status ?? null, signature: a.penalty?.signature ?? null, notify: a.notify?.status ?? null })) };
 }
 
 const server = createServer(async (req, res) => {
@@ -151,16 +255,24 @@ const server = createServer(async (req, res) => {
       }
       if (req.method === 'GET') return send(res, 200, { live, age_ms: live ? Date.now() - Date.parse(live.updated_at) : null });
     }
+    if (req.method === 'POST' && url.pathname === '/walk-progress') {
+      let body; try { body = await readJson(req); } catch { return send(res, 400, { error: 'invalid_json' }); }
+      const r = await handleWalkProgress(body);
+      return send(res, r.status, r.body);
+    }
     if (req.method === 'POST' && url.pathname === '/penalty') {
       let body; try { body = await readJson(req); } catch { return send(res, 400, { error: 'invalid_json' }); }
-      const date = /^\d{4}-\d{2}-\d{2}$/.test(body.date || '') ? body.date : localDate();
-      if (days[date]?.outcome !== 'missed') return send(res, 409, { error: 'not_missed', date, outcome: days[date]?.outcome ?? null });
-      const result = await runPenalty(date);
-      return send(res, 200, { date, penalty: days[date].penalty ?? null, notify: days[date].notify ?? null, error: result.error });
+      return send(res, 200, await handlePenaltyRetry(body));
     }
     if (req.method === 'GET' && url.pathname === '/status') {
       const date = url.searchParams.get('date') || localDate();
-      return send(res, 200, { date, goal: STEP_GOAL, calling: Boolean(callInProgress), record: days[date] ?? null });
+      const rec = days[date] ?? { attempts: [] };
+      const { callsToday, cooldownUntil } = callBudget(date);
+      return send(res, 200, {
+        date, goal: STEP_GOAL, steps: rec.steps ?? null, calling: Boolean(callInProgress),
+        calls_today: callsToday, max_calls_per_day: maxLabel, cooldown_until: cooldownUntil,
+        attempts: rec.attempts,
+      });
     }
     send(res, 404, { error: 'not_found' });
   } catch (err) {
@@ -169,4 +281,4 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => log('step server listening', { port: PORT, goal: STEP_GOAL }));
+server.listen(PORT, '0.0.0.0', () => log('step server listening', { port: PORT, goal: STEP_GOAL, cooldown_min: CALL_COOLDOWN_MS / 60_000, max_calls_per_day: maxLabel }));

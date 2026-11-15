@@ -65,11 +65,11 @@ export function charityAddress() {
 }
 
 /**
- * Sends (or finishes sending) one day's penalty. `prev` is the day's saved penalty record, if any; `save` persists
- * progress so a crash or retry never sends a second transfer for the same day.
+ * Sends (or finishes sending) one call's penalty. `prev` is that call's saved penalty record, if any; `save` persists
+ * progress so a crash or retry never sends a second transfer for the same call.
  * @returns the final penalty record: status "confirmed" or "failed" (failed = nothing was paid)
  */
-export async function payPenalty({ date, prev, save }) {
+export async function payPenalty({ date, label = `missed workout ${date}`, prev, save }) {
   if (prev?.status === 'confirmed') return prev;
   const connection = await devnet();
 
@@ -94,7 +94,7 @@ export async function payPenalty({ date, prev, save }) {
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
   const tx = new Transaction({ feePayer: escrow.publicKey, blockhash, lastValidBlockHeight })
     .add(SystemProgram.transfer({ fromPubkey: escrow.publicKey, toPubkey: to, lamports }))
-    .add(new TransactionInstruction({ programId: MEMO_PROGRAM, keys: [], data: Buffer.from(`FaceTime coach: missed workout ${date}`) }));
+    .add(new TransactionInstruction({ programId: MEMO_PROGRAM, keys: [], data: Buffer.from(`FaceTime coach: ${label}`.slice(0, 120)) }));
   tx.sign(escrow);
   const signature = bs58.encode(tx.signature);
 

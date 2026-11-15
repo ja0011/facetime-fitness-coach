@@ -66,7 +66,7 @@ const agent = defineAgent({
     let stopWalk = () => {};
     const stopGreeting = greetOnBridgeReady(ctx.room, () => {
       session.generateReply({ instructions: greeting });
-      stopWalk = startWalkChallenge({ session, callStart: Date.now(), log: (msg, extra = {}) => console.log(`[walk] ${msg}`, JSON.stringify(extra)) });
+      stopWalk = startWalkChallenge({ session, callStart: Date.now(), room: ctx.room.name, log: (msg, extra = {}) => console.log(`[walk] ${msg}`, JSON.stringify(extra)) });
     });
     ctx.addShutdownCallback(async () => { stopGreeting(); stopWalk(); });
   },

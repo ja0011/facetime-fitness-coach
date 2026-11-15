@@ -44,6 +44,7 @@ async function chert(path, { method = 'GET', body, idempotencyKey } = {}) {
   if (!res.ok) {
     const err = new Error(`Chert ${method} ${path} -> HTTP ${res.status}: ${JSON.stringify(json?.error ?? json).slice(0, 400)}`);
     err.status = res.status; err.body = json;
+    err.code = json?.code ?? json?.error?.code; // e.g. "line_busy"
     throw err;
   }
   return { status: res.status, json };
@@ -109,21 +110,21 @@ export async function placeCall({ destination = env('MY_PHONE'), video = true, o
     await waitForAgent(rooms, roomName, 15_000);
 
     // 3. Ask Chert to dial. 201 = allocated (not answered). The idempotency key makes a retry safe.
-    const { json: created } = await chert('/calls', {
-      method: 'POST',
-      idempotencyKey: `create-${attempt}`,
-      body: {
-        direction: 'outbound',
-        mode: 'customer_managed',
-        line_id: env('CHERT_LINE_ID'),
-        destination,
-        destination_type: destination.includes('@') ? 'email' : 'phone',
-        media: { audio: true, video },
-        livekit_url: livekitUrl,
-        participant_token: bridgeToken,
-        remote_participant_identity: agentName,
-      },
-    });
+    // Shared lines take one call at a time, often another team's: when_busy "queue" waits up to 2 min for the
+    // line (HTTP 202 + queue id) instead of failing with 409 line_busy.
+    const createBody = {
+      direction: 'outbound',
+      mode: 'customer_managed',
+      line_id: env('CHERT_LINE_ID'),
+      destination,
+      destination_type: destination.includes('@') ? 'email' : 'phone',
+      media: { audio: true, video },
+      livekit_url: livekitUrl,
+      participant_token: bridgeToken,
+      remote_participant_identity: agentName,
+      when_busy: 'queue',
+    };
+    const created = await createCall(createBody, `create-${attempt}`, onEvent);
     const callId = created.data.id;
     onEvent({ type: 'call_created', call_id: callId, status: created.data.status });
 
@@ -134,6 +135,42 @@ export async function placeCall({ destination = env('MY_PHONE'), video = true, o
     await rooms.deleteRoom(roomName).catch(() => {});
   }
 }
+
+/**
+ * POST /calls, waiting in Chert's busy-line queue if needed. Per the docs: 202 { queued: true } means waiting;
+ * poll GET /calls/queue/{id}; when its state is "ready", repeat the SAME create (same body and idempotency key)
+ * within the 20-second turn. Returns the 201 body.
+ */
+async function createCall(body, idempotencyKey, onEvent) {
+  const first = await chert('/calls', { method: 'POST', idempotencyKey, body });
+  if (first.status === 201 || first.json?.data?.id && !isQueued(first.json)) return first.json;
+
+  const q = first.json?.data ?? first.json;
+  const queueId = q?.queue_id ?? q?.queue?.id ?? q?.id;
+  if (!queueId) throw new Error(`Chert queued the call but returned no queue id (keys: ${JSON.stringify(Object.keys(q ?? {}))})`);
+  onEvent({ type: 'line_busy_queued', queue_id: queueId, position: q?.position ?? null });
+
+  const until = Date.now() + 150_000; // Chert's queue waits up to 2 minutes
+  while (Date.now() < until) {
+    await new Promise(r => setTimeout(r, 2000));
+    const { json } = await chert(`/calls/queue/${queueId}`);
+    // Shape: { data: { queued, queue: { id, state: "waiting" | "ready" | ..., position, expires_at }, message } }
+    const entry = json?.data ?? json;
+    const state = entry?.queue?.state ?? entry?.state ?? entry?.status;
+    if (state === 'ready') {
+      onEvent({ type: 'line_free', queue_id: queueId });
+      const again = await chert('/calls', { method: 'POST', idempotencyKey, body });
+      if (isQueued(again.json)) continue; // lost the turn; keep waiting while the queue entry lasts
+      return again.json;
+    }
+    if (['expired', 'cancelled', 'canceled', 'failed'].includes(state)) throw lineBusy(`Busy-line queue ${state}: the line stayed busy (another team's call)`);
+  }
+  await chert(`/calls/queue/${queueId}`, { method: 'DELETE' }).catch(() => {});
+  throw lineBusy('Line stayed busy for 2.5 minutes (another team on the shared line)');
+}
+/** An error the caller can retry later: the shared line was busy with someone else's call. */
+const lineBusy = message => Object.assign(new Error(message), { code: 'line_busy' });
+const isQueued = json => (json?.data?.queued ?? json?.queued) === true;
 
 async function waitForAgent(rooms, roomName, timeoutMs) {
   const until = Date.now() + timeoutMs;
