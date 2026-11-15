@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key><string>en</string>
+	<key>CFBundleDisplayName</key><string>StepStream</string>
+	<key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key><true/>
+	<key>UILaunchScreen</key><dict/>
+	<key>UIApplicationSupportsIndirectInputEvents</key><true/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array><string>UIInterfaceOrientationPortrait</string></array>
+
+	<!-- Why each permission is needed (shown in the iOS permission prompts) -->
+	<key>NSMotionUsageDescription</key>
+	<string>StepStream counts your steps live so your AI coach can cheer you through the walking challenge.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>StepStream uses location only to keep running in the background while you are on FaceTime with your coach. Your location is never sent anywhere.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>StepStream uses location only to keep running in the background while you are on FaceTime with your coach. Your location is never sent anywhere.</string>
+
+	<!-- Background location keeps the app alive (and the step stream flowing) while FaceTime is in the foreground -->
+	<key>UIBackgroundModes</key>
+	<array><string>location</string></array>
+
+	<!-- The tunnel URL is HTTPS. This only also allows plain http to a .local / LAN address for same-Wi-Fi testing. -->
+	<key>NSAppTransportSecurity</key>
+	<dict><key>NSAllowsLocalNetworking</key><true/></dict>
+</dict>
+</plist>
