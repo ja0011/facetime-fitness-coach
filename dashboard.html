@@ -205,9 +205,13 @@
 
   <section class="card" id="stake-card" hidden>
     <div class="stake-head">
-      <div><p class="eyebrow">Money on the line</p><div class="stake-big" id="k-lost"></div></div>
+      <div><p class="eyebrow">Money on the line</p><div class="stake-big" id="k-lost"></div><p class="sub" style="margin-top:6px" id="k-rate"></p></div>
+      <button class="btn secondary" id="change-stake">Change amount</button>
     </div>
-    <p class="sub small" style="margin-top:8px" id="k-note"></p>
+    <div class="stake-box" id="c-stake" hidden>
+      <div><p class="small muted" style="margin:0 0 6px">Donated per missed check-in</p><div class="chips" id="c-penalty"></div></div>
+      <div class="actions"><button class="btn" id="c-save">Save</button><button class="link" id="c-cancel">Cancel</button><span class="error" id="c-error"></span></div>
+    </div>
   </section>
 
 
@@ -278,18 +282,21 @@ const LEVELS = [
   { steps: 400, name: 'Active', desc: 'Keep me moving often' },
 ];
 const PENALTIES = [0.02, 0.05, 0.1];
+// "0.05 SOL ($3.57)": the dollar figure is what the same amount of real SOL is worth (the app uses devnet SOL).
+const usd = n => state?.sol_usd > 0 && n != null ? `$${(n * state.sol_usd).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : null;
+const money = n => `${sol(n)} SOL${usd(n) ? ` (${usd(n)})` : ''}`;
 function fillHours(sel, from, to, value) { sel.innerHTML = ''; for (let h = from; h <= to; h++) sel.add(new Option(hourLabel(h), h, false, h === value)); }
 function levelPicker(el, value, onPick) {
   el.innerHTML = LEVELS.map(l => `<button type="button" class="option" data-v="${l.steps}" aria-pressed="${l.steps === value}"><b>${l.name}</b><span>${l.desc} (under ${l.steps} steps)</span></button>`).join('');
   el.querySelectorAll('.option').forEach(b => b.onclick = () => { el.querySelectorAll('.option').forEach(x => x.setAttribute('aria-pressed', String(x === b))); onPick(+b.dataset.v); });
 }
 function chipPicker(el, values, value, unit, onPick) {
-  el.innerHTML = values.map(v => `<button type="button" class="chip" data-v="${v}" aria-pressed="${v === value}">${v} ${unit}</button>`).join('');
+  el.innerHTML = values.map(v => `<button type="button" class="chip" data-v="${v}" aria-pressed="${v === value}">${v} ${unit}${unit === 'SOL' && usd(v) ? ` · ${usd(v)}` : ''}</button>`).join('');
   el.querySelectorAll('.chip').forEach(b => b.onclick = () => { el.querySelectorAll('.chip').forEach(x => x.setAttribute('aria-pressed', String(x === b))); onPick(+b.dataset.v); });
 }
 const stakeSentence = (penalty, charity, balance) =>
-  `Every missed or unfinished check-in today donates <b>${penalty} SOL</b>${charity ? ` to <a href="${addr(charity)}" target="_blank" rel="noopener">charity</a>` : ' to charity'}.`
-  + (balance != null ? ` <span class="muted">(Your wallet holds ${sol(balance)} SOL.)</span>` : '');
+  `Every missed or unfinished check-in today donates <b>${money(penalty)}</b>${charity ? ` to <a href="${addr(charity)}" target="_blank" rel="noopener">charity</a>` : ' to charity'}.`
+  + (balance != null ? ` <span class="muted">(Your wallet holds ${money(balance)}.)</span>` : '');
 
 // ---------- setup form (before the day starts) ----------
 const setup = { start: 9, end: 17, level: 250, stake: false, penalty: 0.05, ready: false };
@@ -318,13 +325,30 @@ $('start-day').onclick = async () => {
 // ---------- add a stake later (free mode) ----------
 const late = { penalty: 0.05 };
 const lateSummary = () => { $('l-summary').innerHTML = stakeSentence(late.penalty, state?.wallet?.charity, state?.wallet?.escrow_sol); };
-chipPicker($('l-penalty'), PENALTIES, late.penalty, 'SOL', v => { late.penalty = v; lateSummary(); });
-$('add-stake').onclick = () => { $('late-stake').hidden = !$('late-stake').hidden; lateSummary(); };
+$('add-stake').onclick = () => {
+  chipPicker($('l-penalty'), PENALTIES, late.penalty, 'SOL', v => { late.penalty = v; lateSummary(); });
+  $('late-stake').hidden = !$('late-stake').hidden; lateSummary();
+};
 $('l-commit').onclick = async () => {
   $('l-error').textContent = '';
   const r = await api('/api/stake', { method: 'POST', body: JSON.stringify({ penalty_sol: late.penalty }) });
   const j = await r.json();
   if (!r.ok) $('l-error').textContent = j.error; else { $('late-stake').hidden = true; poll(); }
+};
+
+// ---------- change the amount (already committed) ----------
+const change = { penalty: 0.05 };
+$('change-stake').onclick = () => {
+  change.penalty = state?.stake?.penalty_sol ?? 0.05;
+  chipPicker($('c-penalty'), PENALTIES, change.penalty, 'SOL', v => change.penalty = v);
+  $('c-stake').hidden = false; $('change-stake').hidden = true; $('c-error').textContent = '';
+};
+$('c-cancel').onclick = () => { $('c-stake').hidden = true; $('change-stake').hidden = false; };
+$('c-save').onclick = async () => {
+  $('c-error').textContent = '';
+  const r = await api('/api/stake', { method: 'POST', body: JSON.stringify({ penalty_sol: change.penalty }) });
+  const j = await r.json();
+  if (!r.ok) $('c-error').textContent = j.error; else { $('c-stake').hidden = true; $('change-stake').hidden = false; poll(); }
 };
 
 // ---------- settings (after the day starts) ----------
@@ -362,7 +386,7 @@ function moneyCell(a) {
   const p = a.penalty;
   if (!p) return '';
   if (p.status === 'skipped') return `<span class="money free">${p.reason === 'free_mode' ? 'Free mode' : 'Stake used up'}</span>`;
-  const amt = p.sol != null ? `−${sol(p.sol)} SOL` : '';
+  const amt = p.sol != null ? `−${money(p.sol)}` : '';
   return `<span class="money lost">${amt} donated${p.explorer_url ? ` · <a href="${esc(p.explorer_url)}" target="_blank" rel="noopener">receipt</a>` : ''}</span>`;
 }
 
@@ -381,7 +405,7 @@ function renderDay(d) {
     const locked = d.stake.committed;
     $('s-stake-switch').hidden = locked; if (locked) $('s-stake').hidden = true;
     $('s-stake-locked').hidden = !locked;
-    if (locked) $('s-stake-locked').innerHTML = `<b>Already committed today:</b> ${sol(d.stake.penalty_sol)} SOL donated per missed check-in.`;
+    if (locked) $('s-stake-locked').innerHTML = `<b>Already committed today:</b> ${money(d.stake.penalty_sol)} donated per missed check-in.`;
     return;
   }
 
@@ -412,7 +436,7 @@ function renderDay(d) {
   const st = d.stake;
   if (st.committed) {
     $('t-money-label').textContent = 'Donated today'; $('t-money').textContent = `${sol(st.lost_sol)} SOL`;
-    $('t-money-note').textContent = `${sol(st.penalty_sol)} SOL per missed check-in`;
+    $('t-money-note').textContent = usd(st.lost_sol) ? `${usd(st.lost_sol)}` : '';
   } else { $('t-money-label').textContent = 'Mode'; $('t-money').textContent = 'Free'; $('t-money-note').textContent = 'No money on the line'; }
 
   // Stake card (only when committed); free mode shows a small prompt in the settings card instead
@@ -420,8 +444,8 @@ function renderDay(d) {
   $('free-row').hidden = st.committed;
   if (st.committed) {
     $('late-stake').hidden = true;
-    $('k-lost').textContent = st.lost_sol > 0 ? `${sol(st.lost_sol)} SOL donated today` : 'Nothing donated yet';
-    $('k-note').textContent = st.charged_count ? `${st.charged_count} missed or unfinished check-in${st.charged_count === 1 ? '' : 's'} since you committed at ${clock(st.committed_at)}.` : `Committed at ${clock(st.committed_at)}. Answer every check-in and nothing is donated.`;
+    $('k-lost').textContent = st.lost_sol > 0 ? `${money(st.lost_sol)} donated today` : 'Nothing donated yet';
+    $('k-rate').textContent = `${money(st.penalty_sol)} per missed check-in`;
   }
 
   // Timeline (newest first)
@@ -434,7 +458,7 @@ function renderDay(d) {
   const lvl = LEVELS.find(l => l.steps === s.inactive_steps);
   $('settings-summary').textContent = `${hourLabel(s.work_start)} – ${hourLabel(s.work_end)} · ${lvl ? lvl.name : `Custom (${s.inactive_steps} steps)`}`;
   if (d.wallet) {
-    $('w-balance').textContent = `${sol(d.wallet.escrow_sol)} SOL`;
+    $('w-balance').textContent = money(d.wallet.escrow_sol);
     $('w-escrow').innerHTML = `<a class="mono" href="${addr(d.wallet.escrow)}" target="_blank" rel="noopener">${short(d.wallet.escrow)}</a>`;
     $('w-charity').innerHTML = d.wallet.charity ? `<a class="mono" href="${addr(d.wallet.charity)}" target="_blank" rel="noopener">${short(d.wallet.charity)}</a>` : 'not set';
   }

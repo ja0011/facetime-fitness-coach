@@ -4,6 +4,7 @@
 // Idempotent per attempt (one attempt = one Chert call_id): a confirmed penalty is never paid again.
 import { payPenalty } from './solana.mjs';
 import { textOwner } from './imessage.mjs';
+import { formatUsd, solUsd } from './price.mjs';
 
 export const CHARGEABLE = new Set(['missed', 'failed']);
 
@@ -37,7 +38,8 @@ export async function applyPenalty({ date, attempt, lamports, get, save }) {
   const why = attempt.outcome !== 'failed' ? 'You missed your workout call'
     : repsFailed ? `You answered but stopped at ${attempt.reps?.progress ?? 0} of ${attempt.reps?.target ?? attempt.challenge?.reps ?? '?'} ${words}`
     : `You answered but stopped at ${attempt.walk?.progress ?? 0} of ${attempt.walk?.target ?? attempt.challenge?.walk ?? '?'} steps`;
-  const text = `${why}, so ${penalty.sol} devnet SOL went from your escrow to charity.\n${penalty.explorer_url}`;
+  const usd = formatUsd(penalty.sol, await solUsd());
+  const text = `${why}, so ${penalty.sol} devnet SOL${usd ? ` (${usd})` : ''} went from your escrow to charity.\n${penalty.explorer_url}`;
   const notify = { ...(await textOwner(text, `penalty-text-${key}-${n}`)), attempt: n };
   await save({ notify });
   return { penalty, notify };

@@ -24,6 +24,7 @@ import { placeCall } from './outbound.mjs';
 import { applyPenalty, CHARGEABLE } from './penalty.mjs';
 import { DEMO_MODE, describeChallenge, INACTIVE_STEPS, pickChallenge } from './challenge.mjs';
 import { walletInfo } from './solana.mjs';
+import { solUsd } from './price.mjs';
 import { DataPacket_Kind, RoomServiceClient } from 'livekit-server-sdk';
 
 const PORT = Number(process.env.PORT || 3000);
@@ -426,12 +427,19 @@ function validateSettings(b) {
 
 /** Commit today: every missed or unfinished check-in donates penaltyIn SOL (no daily cap). Locked for the day. */
 async function commitStake(date, penaltyIn) {
-  if (day(date).stake?.committed) return { status: 409, error: 'You’ve already committed for today.' };
   const penalty = solOf(penaltyIn);
   const w = (await cachedWallet()).value;
   if (!(penalty > 0)) return { status: 400, error: 'Choose an amount above 0 SOL.' };
   if (w && penalty > w.max_penalty_sol) return { status: 400, error: `A single donation is capped at ${w.max_penalty_sol} SOL as a safety limit.` };
   if (w && penalty > w.escrow_sol) return { status: 400, error: `Your wallet holds ${w.escrow_sol} SOL, not enough for even one donation of ${penalty} SOL.` };
+  const prev = day(date).stake;
+  if (prev?.committed) {
+    // Changing the amount: applies to misses from now on (a charge already planned keeps its amount);
+    // committed_at stays, so today's donated total still counts everything since the first commit.
+    await updateDay(date, { stake: { ...prev, penalty_sol: penalty } });
+    log('stake changed', { date, from: prev.penalty_sol, to: penalty });
+    return null;
+  }
   await updateDay(date, { stake: { committed: true, penalty_sol: penalty, committed_at: new Date().toISOString() } });
   log('stake committed', { date, penalty_sol: penalty, daily_cap: 'none' });
   return null;
@@ -443,9 +451,9 @@ async function handleApi(req, res, url) {
     const rec = day(date);
     const current = callInProgress ? [...rec.attempts].reverse().find(a => a.status === 'calling') : null;
     const sch = activity.scheduled;
-    const w = await cachedWallet();
+    const [w, sol_usd] = await Promise.all([cachedWallet(), solUsd()]);
     return send(res, 200, {
-      now: new Date().toISOString(), date, demo_mode: DEMO_MODE,
+      now: new Date().toISOString(), date, demo_mode: DEMO_MODE, sol_usd,
       day: { started_at: rec.started_at ?? null, steps: rec.steps ?? null, in_work_hours: DEMO_MODE || inWorkHours() },
       settings: settings(),
       stake: stakeStatus(date),
