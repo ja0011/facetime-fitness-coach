@@ -1,0 +1,4 @@
+# Pose rep counter (pose_worker.py). Versions pinned; each was released at least two weeks before it was added.
+livekit-agents==1.8.10   # worker + named dispatch, brings livekit (rtc) and livekit-api
+mediapipe==1.2.0         # Pose Landmarker
+python-dotenv==1.2.4     # reads ../.env.local

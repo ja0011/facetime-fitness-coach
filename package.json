@@ -8,11 +8,14 @@
   },
   "scripts": {
     "start": "node --env-file=.env.local agent.mjs start",
-    "check": "node --check agent.mjs && node --check greet.mjs && node --check chert-rooms.mjs && node --check video.mjs && node --check outbound.mjs && node --check server.mjs && node --check solana.mjs && node --check imessage.mjs && node --check penalty.mjs && node --check wallet.mjs && node --check livesteps.mjs",
+    "check": "node --check agent.mjs && node --check greet.mjs && node --check chert-rooms.mjs && node --check video.mjs && node --check outbound.mjs && node --check server.mjs && node --check solana.mjs && node --check imessage.mjs && node --check penalty.mjs && node --check wallet.mjs && node --check livesteps.mjs && node --check repchallenge.mjs",
     "help": "node agent.mjs --help",
     "call": "node --env-file=.env.local outbound.mjs",
     "server": "node --env-file=.env.local server.mjs",
-    "wallet": "node --env-file=.env.local wallet.mjs"
+    "wallet": "node --env-file=.env.local wallet.mjs",
+    "pose": "pose/.venv/bin/python pose/pose_worker.py start",
+    "pose:setup": "bash pose/setup.sh",
+    "pose:test": "pose/.venv/bin/python -I pose/test_reps.py"
   },
   "dependencies": {
     "@livekit/agents": "1.8.0",

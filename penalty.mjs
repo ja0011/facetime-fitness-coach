@@ -14,8 +14,10 @@ export const CHARGEABLE = new Set(['missed', 'failed']);
 export async function applyPenalty({ date, attempt, get, save }) {
   if (!CHARGEABLE.has(attempt.outcome)) return { skipped: `outcome is ${attempt.outcome ?? 'unknown'}` };
   const key = attempt.call_id || attempt.id;
+  const words = { squat: 'squats', pushup: 'push-ups', jumping_jack: 'jumping jacks' }[attempt.reps?.exercise] ?? 'reps';
+  const repsFailed = attempt.outcome === 'failed' && attempt.fail_reason === 'reps';
   const label = attempt.outcome === 'failed'
-    ? `walk not finished ${date} call ${key.slice(0, 8)}`
+    ? `${repsFailed ? 'reps' : 'walk'} not finished ${date} call ${key.slice(0, 8)}`
     : `missed call ${date} call ${key.slice(0, 8)}`;
 
   // 1. Pay.
@@ -31,9 +33,9 @@ export async function applyPenalty({ date, attempt, get, save }) {
   const prevNotify = get().notify;
   if (prevNotify?.status === 'sent') return { penalty, notify: prevNotify };
   const n = (prevNotify?.attempt ?? 0) + (prevNotify?.status === 'refused' ? 1 : 0);
-  const why = attempt.outcome === 'failed'
-    ? `You answered but stopped at ${attempt.walk?.progress ?? 0} of ${attempt.walk?.target ?? '?'} steps`
-    : 'You missed your workout call';
+  const why = attempt.outcome !== 'failed' ? 'You missed your workout call'
+    : repsFailed ? `You answered but stopped at ${attempt.reps?.progress ?? 0} of ${attempt.reps?.target ?? '?'} ${words}`
+    : `You answered but stopped at ${attempt.walk?.progress ?? 0} of ${attempt.walk?.target ?? '?'} steps`;
   const text = `${why}, so ${penalty.sol} devnet SOL went from your escrow to charity.\n${penalty.explorer_url}`;
   const notify = { ...(await textOwner(text, `penalty-text-${key}-${n}`)), attempt: n };
   await save({ notify });

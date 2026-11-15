@@ -32,6 +32,10 @@ const BUSY_RETRIES = Number(process.env.BUSY_RETRIES ?? 8);
 const BUSY_RETRY_DELAY_MS = 60_000;
 // After the call ends, wait this long for the agent's last walk report before deciding answered vs failed.
 const WALK_REPORT_GRACE_MS = 4000;
+// Rep challenge after the walk (see repchallenge.mjs). 0 = walk only. Must match the agent's .env.local value.
+const REPS_TARGET = Number(process.env.REPS_TARGET ?? 10);
+// 0 = no walk (squats only). Must match the agent's .env.local value.
+const WALK_TARGET = Number(process.env.WALK_TARGET ?? 300);
 // DATA_DIR lets a test run use a throwaway folder instead of ./data.
 const DATA_DIR = process.env.DATA_DIR ? pathToFileURL(process.env.DATA_DIR.replace(/\/?$/, '/')) : new URL('./data/', import.meta.url);
 const STATE_FILE = new URL('days.json', DATA_DIR);
@@ -121,6 +125,20 @@ async function handleWalkProgress(body) {
   const ref = typeof body.room === 'string' && roomToAttempt.get(body.room);
   // Inbound calls through chert dev have no attempt here: that's fine, nothing to record.
   if (!ref) return { status: 404, body: { error: 'unknown_room' } };
+  // Rep challenge progress from the coach (counts come from pose/pose_worker.py): { room, reps: { exercise, target, progress, completed, counter_seen } }
+  if (body.reps && typeof body.reps === 'object') {
+    const r = body.reps;
+    const prev = findAttempt(ref.date, ref.id)?.reps;
+    const target = Math.max(1, Math.floor(Number(r.target) || 0));
+    const progress = Math.max(Math.floor(Number(r.progress) || 0), prev?.progress ?? 0);
+    await updateAttempt(ref.date, ref.id, { reps: {
+      exercise: String(r.exercise || 'squat').slice(0, 20), target, progress,
+      completed: Boolean(prev?.completed) || r.completed === true || progress >= target,
+      counter_seen: Boolean(prev?.counter_seen) || r.counter_seen === true,
+      updated_at: new Date().toISOString(),
+    } });
+    return { status: 200, body: { ok: true } };
+  }
   const progress = Math.max(0, Math.floor(Number(body.progress) || 0));
   const target = Math.max(1, Math.floor(Number(body.target) || 0));
   const prev = findAttempt(ref.date, ref.id)?.walk;
@@ -177,15 +195,33 @@ async function runCall(date, id) {
         },
       });
 
-      // Answered is not enough: the walk target must have been reached before the call ended.
+      // Answered is not enough: the walk, then the rep challenge (when REPS_TARGET > 0), must be finished.
       let outcome = result.outcome;
-      let walk = findAttempt(date, id).walk;
-      if (outcome === 'answered') {
-        if (!walk?.completed) { await new Promise(r => setTimeout(r, WALK_REPORT_GRACE_MS)); walk = findAttempt(date, id).walk; }
-        if (!walk?.completed) outcome = 'failed';
+      let failReason = null;
+      let repsUnverified = false;
+      let { walk, reps } = findAttempt(date, id);
+      // Answered, but Chert says the call FAILED (not ended by a hang-up): it dropped on our side (e.g. the coach's
+      // model session crashed). Not the caller's fault, so no penalty.
+      if (outcome === 'answered' && result.status === 'failed') {
+        outcome = 'error';
+        failReason = 'call_dropped';
       }
-      log('call finished', { date, attempt: id, outcome, call_id: result.call_id, terminal_reason: result.terminal_reason, walk_progress: walk?.progress ?? 0, walk_target: walk?.target ?? null });
-      const attempt = await set({ status: 'done', status_detail: null, ...result, outcome, walk: walk ?? { progress: 0, completed: false } });
+      if (outcome === 'answered') {
+        const walkDone = () => WALK_TARGET <= 0 || walk?.completed;
+        const done = () => walkDone() && (REPS_TARGET <= 0 || reps?.completed);
+        if (!done()) { await new Promise(r => setTimeout(r, WALK_REPORT_GRACE_MS)); ({ walk, reps } = findAttempt(date, id)); }
+        if (!walkDone()) { outcome = 'failed'; failReason = 'walk'; }
+        else if (REPS_TARGET > 0 && !reps?.completed) {
+          // The rep phase started (the coach reports that at once), but if the pose counter never connected we
+          // couldn't count: that's not the caller's fault, so no penalty. Otherwise, unfinished reps = failed.
+          if (reps && !reps.counter_seen) repsUnverified = true;
+          else { outcome = 'failed'; failReason = 'reps'; }
+        }
+      }
+      log('call finished', { date, attempt: id, outcome, fail_reason: failReason, call_id: result.call_id, terminal_reason: result.terminal_reason,
+        walk: `${walk?.progress ?? 0}/${walk?.target ?? '?'}`, reps: reps ? `${reps.progress}/${reps.target} ${reps.exercise}${reps.counter_seen ? '' : ' (no counter)'}` : null });
+      const attempt = await set({ status: 'done', status_detail: null, ...result, outcome, fail_reason: failReason, reps_unverified: repsUnverified || undefined,
+        walk: walk ?? { progress: 0, completed: false } });
       if (CHARGEABLE.has(outcome)) await runPenalty(date, id);
       return attempt;
     } catch (err) {

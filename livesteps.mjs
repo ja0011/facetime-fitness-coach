@@ -15,14 +15,16 @@ const ANNOUNCE_EVERY = Number(process.env.WALK_CALLOUT_EVERY || process.env.WALK
 const MIN_GAP_MS = 1000 * Number(process.env.WALK_CALLOUT_MIN_GAP_S || 8);
 const NUDGE_EVERY_MS = 45_000; // repeat "open StepStream" at most this often
 
-export const WALK_TARGET = Number(process.env.WALK_TARGET || 300);
+// 0 skips the walk (the call goes straight to the rep challenge). `??`, not `||`, so 0 isn't turned back into 300.
+export const WALK_TARGET = Number(process.env.WALK_TARGET ?? 300);
 
 /**
- * @param {{ session: any, callStart: number, room?: string, log?: (msg: string, extra?: object) => void }} opts
+ * @param {{ session: any, callStart: number, room?: string, onComplete?: () => void, log?: (msg: string, extra?: object) => void }} opts
+ *   onComplete: called once when the walk target is reached (the rep challenge starts from here).
  *   room: the LiveKit room name, so server.mjs can attach walk progress to the right call (answered vs failed).
  * @returns {() => void} stop
  */
-export function startWalkChallenge({ session, callStart, room, log = () => {} }) {
+export function startWalkChallenge({ session, callStart, room, onComplete, log = () => {} }) {
   const base = process.env.LIVE_STEPS_URL || `http://127.0.0.1:${process.env.PORT || 3000}`;
   const url = `${base}/live-steps`;
   const token = process.env.STEPS_TOKEN;
@@ -34,6 +36,31 @@ export function startWalkChallenge({ session, callStart, room, log = () => {} })
   let lastAnnounceAt = 0;
   let lastNudgeAt = 0;
   let finished = false;
+  // Set the moment the target is reached. The celebration waits for a quiet moment, but nothing after this
+  // (StepStream going stale, people talking) can stop the next challenge from starting.
+  let celebrate = null; // { progress, at }
+  let completeFired = false;
+  const CELEBRATE_MAX_WAIT_MS = 8000;
+
+  function fireComplete() {
+    if (completeFired) return;
+    completeFired = true;
+    if (onComplete) onComplete();
+  }
+
+  /** Runs on every tick, before anything else: celebrate when quiet (or after 8 s anyway), then hand over. */
+  function finishUp(now) {
+    if (!celebrate || celebrate.said) return;
+    if (!quiet() && now - celebrate.at < CELEBRATE_MAX_WAIT_MS) return;
+    celebrate.said = true;
+    log('walk: celebrating', { progress: celebrate.progress });
+    if (onComplete) {
+      say(`In one short sentence, celebrate: the caller just hit ${celebrate.progress} steps and completed the ${WALK_TARGET}-step walk. Use exactly these numbers. Do not wrap up: there is one more challenge.`);
+      setTimeout(fireComplete, 4000); // let the celebration play before the next challenge starts
+    } else {
+      say(`Celebrate briefly: the caller just hit ${celebrate.progress} steps and completed the ${WALK_TARGET}-step walking challenge. Then wrap up warmly in one sentence. Use exactly these numbers.`);
+    }
+  }
   let wasStale = true;
 
   const quiet = () => session.agentState !== 'speaking' && session.agentState !== 'thinking' && session.userState !== 'speaking';
@@ -72,6 +99,8 @@ export function startWalkChallenge({ session, callStart, room, log = () => {} })
     const liveRec = data?.live;
     const fresh = liveRec && data.age_ms != null && data.age_ms < STALE_MS;
     const now = Date.now();
+    finishUp(now);
+    if (finished) return; // walk done: StepStream going quiet now doesn't matter
 
     if (!fresh) {
       wasStale = true;
@@ -95,13 +124,12 @@ export function startWalkChallenge({ session, callStart, room, log = () => {} })
     await report(progress, progress >= WALK_TARGET);
 
     if (!finished && progress >= WALK_TARGET) {
-      if (!quiet()) return; // try again on the next poll
-      finished = true;
+      finished = true; // lock it in now; the celebration and hand-over happen in finishUp()
+      celebrate = { progress, at: now };
       log('walk: target reached', { progress });
-      say(`Celebrate briefly: the caller just hit ${progress} steps and completed the ${WALK_TARGET}-step walking challenge. Then wrap up warmly in one sentence. Use exactly these numbers.`);
+      finishUp(now);
       return;
     }
-    if (finished) return;
 
     if (wasStale && quiet()) {
       wasStale = false;

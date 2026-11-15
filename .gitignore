@@ -23,3 +23,8 @@ xcuserdata/
 
 # Local backups of earlier agent versions
 *.bak
+
+# Pose rep counter: venv and downloaded model
+pose/.venv/
+pose/models/
+__pycache__/
