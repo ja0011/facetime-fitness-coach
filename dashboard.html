@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desk Break</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #15181d; --muted: #667080; --faint: #9aa2ae; --line: #e5e8ed;
+    --accent: #2f6fed; --accent-soft: #e9f0fe; --accent-ink: #ffffff;
+    --good: #12805c; --good-soft: #e5f4ee; --bad: #c43b2f; --bad-soft: #fbeceb; --warn: #a96a12; --warn-soft: #fcf2e2;
+    --radius: 14px; --shadow: 0 1px 2px rgba(16,24,40,.05), 0 2px 8px rgba(16,24,40,.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1114; --card: #171a1f; --ink: #eceef1; --muted: #a0a7b2; --faint: #6f7783; --line: #272c33;
+      --accent: #6d97ff; --accent-soft: #1b2540; --accent-ink: #0b0d11;
+      --good: #43c690; --good-soft: #13281f; --bad: #ff7a6e; --bad-soft: #2c1816; --warn: #f0b552; --warn-soft: #2b2313;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  button { font: inherit; cursor: pointer; }
+
+  /* header */
+  header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 16px; padding: 12px 24px; background: color-mix(in srgb, var(--card) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.01em; }
+  .logo { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, var(--accent), #7b5cff); display: grid; place-items: center; color: #fff; font-size: 14px; }
+  .tabs { display: flex; gap: 2px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
+  .tabs button { border: 0; background: transparent; padding: 5px 12px; border-radius: 7px; color: var(--muted); font-size: 13px; font-weight: 600; }
+  .tabs button[aria-selected="true"] { background: var(--card); color: var(--ink); box-shadow: var(--shadow); }
+  .spacer { flex: 1; }
+  .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .conn i { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .conn.ok i { background: var(--good); } .conn.off i { background: var(--bad); }
+  .link { background: none; border: 0; color: var(--muted); font-size: 13px; padding: 4px 6px; border-radius: 6px; }
+  .link:hover { color: var(--ink); background: var(--bg); }
+  .badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: var(--warn-soft); color: var(--warn); }
+
+  /* day view */
+  .day { max-width: 860px; margin: 0 auto; padding: 28px 24px 56px; display: flex; flex-direction: column; gap: 18px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 22px; }
+  .eyebrow { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; margin: 0 0 6px; }
+  h2 { font-size: 22px; letter-spacing: -.02em; margin: 0 0 4px; }
+  h3 { font-size: 15px; margin: 0 0 10px; }
+  .sub { color: var(--muted); margin: 0; }
+  .muted { color: var(--muted); } .small { font-size: 13px; }
+
+  /* setup */
+  .step { padding: 18px 0; border-top: 1px solid var(--line); }
+  #setup > .sub { margin-bottom: 8px; }
+  #setup .step:first-of-type { border-top: 0; padding-top: 14px; }
+  .hours { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  select { font: inherit; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  .options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  @media (max-width: 640px) { .options { grid-template-columns: 1fr; } }
+  .option { text-align: left; border: 1.5px solid var(--line); background: var(--card); border-radius: 12px; padding: 12px 14px; color: var(--ink); }
+  .option b { display: block; margin-bottom: 2px; } .option span { color: var(--muted); font-size: 13px; }
+  .option[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip { border: 1.5px solid var(--line); background: var(--card); color: var(--ink); border-radius: 999px; padding: 6px 14px; font-weight: 600; font-size: 14px; }
+  .chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+  .switch { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .switch input { appearance: none; width: 44px; height: 26px; border-radius: 999px; background: var(--line); position: relative; cursor: pointer; flex: none; transition: background .15s; }
+  .switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.2); transition: left .15s; }
+  .switch input:checked { background: var(--accent); } .switch input:checked::after { left: 21px; }
+  .stake-box { margin-top: 14px; display: flex; flex-direction: column; gap: 14px; }
+  .summary-line { background: var(--bg); border-radius: 10px; padding: 12px 14px; font-size: 14px; }
+  .btn { border: 0; border-radius: 12px; padding: 12px 20px; font-weight: 700; background: var(--accent); color: var(--accent-ink); }
+  .btn.secondary { background: var(--bg); color: var(--ink); border: 1px solid var(--line); font-weight: 600; padding: 9px 16px; }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
+  .actions { display: flex; align-items: center; gap: 14px; margin-top: 6px; flex-wrap: wrap; }
+  .error { color: var(--bad); font-size: 14px; }
+
+  /* status banner */
+  .status { display: flex; gap: 16px; align-items: center; padding: 20px 22px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--card); box-shadow: var(--shadow); }
+  .status .icon { width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; font-size: 22px; flex: none; background: var(--accent-soft); }
+  .status.good .icon { background: var(--good-soft); } .status.warn .icon { background: var(--warn-soft); } .status.calling .icon { background: var(--good-soft); animation: pulse 1.4s ease-in-out infinite; }
+  .status.calling { border-color: var(--good); }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 45%, transparent); } 50% { box-shadow: 0 0 0 10px transparent; } }
+  .status h2 { font-size: 19px; margin: 0; } .status p { margin: 2px 0 0; color: var(--muted); }
+
+  /* summary tiles */
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  @media (max-width: 640px) { .tiles { grid-template-columns: 1fr; } }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow); }
+  .tile .label { font-size: 13px; color: var(--muted); }
+  .tile .value { font-size: 26px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .tile .note { font-size: 12px; color: var(--muted); }
+
+  /* stake */
+  .stake-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .stake-big { font-size: 30px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .meter { height: 10px; background: var(--line); border-radius: 999px; overflow: hidden; margin: 12px 0 8px; display: flex; }
+  .meter .kept { background: var(--good); transition: width .4s; } .meter .gone { background: var(--bad); transition: width .4s; }
+  .legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+
+  /* timeline */
+  .timeline { list-style: none; margin: 0; padding: 0; }
+  .timeline li { display: grid; grid-template-columns: 64px 18px 1fr auto; gap: 12px; align-items: start; padding: 12px 0; border-top: 1px solid var(--line); }
+  .timeline li:first-child { border-top: 0; }
+  .timeline .t { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; padding-top: 1px; }
+  .timeline .dot { width: 12px; height: 12px; border-radius: 50%; margin-top: 5px; background: var(--faint); }
+  .dot.good { background: var(--good); } .dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); }
+  .timeline .what b { display: block; font-weight: 600; } .timeline .what span { color: var(--muted); font-size: 13px; }
+  .timeline .money { font-size: 13px; text-align: right; white-space: nowrap; }
+  .money.lost { color: var(--bad); } .money.free { color: var(--muted); }
+  .empty { color: var(--muted); padding: 8px 0; }
+
+  /* settings + wallet */
+  .settings-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 14px; list-style: none; }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: "›"; display: inline-block; margin-right: 8px; transition: transform .15s; }
+  details[open] summary::before { transform: rotate(90deg); }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 14px; margin-top: 12px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+
+  /* debug tab (unchanged look: dense cards) */
+  .debug { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 16px; padding: 20px 24px 32px; max-width: 1440px; margin: 0 auto; }
+  @media (max-width: 900px) { .debug { grid-template-columns: 1fr; } }
+  .debug .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+  .pill { display: inline-flex; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--line); color: var(--muted); }
+  .pill.good { background: var(--good-soft); color: var(--good); } .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
+  .stat { background: var(--bg); border-radius: 10px; padding: 10px 12px; } .stat b { display: block; font-variant-numeric: tabular-nums; } .stat span { font-size: 12px; color: var(--muted); }
+  .bar { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; margin: 6px 0 12px; } .bar > span { display: block; height: 100%; background: var(--accent); transition: width .4s; }
+  .big { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pose { aspect-ratio: 16 / 9; background: #000; border-radius: 10px; display: grid; place-items: center; overflow: hidden; }
+  .pose img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .pose .placeholder { color: #9aa1ad; font-size: 13px; }
+
+  /* login */
+  #login { position: fixed; inset: 0; background: var(--bg); display: none; place-items: center; z-index: 10; }
+  #login .card { width: min(380px, calc(100vw - 32px)); }
+  #login input { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); font: inherit; margin: 6px 0 12px; }
+</style>
+</head>
+<body>
+<div id="login">
+  <form class="card" id="login-form">
+    <div class="brand" style="margin-bottom:14px"><span class="logo">↑</span> Desk Break</div>
+    <label class="small muted" for="token">Access token</label>
+    <input id="token" type="password" autocomplete="off" required>
+    <button class="btn" type="submit" style="width:100%">Sign in</button>
+    <p class="error" id="login-error"></p>
+    <p class="small muted" style="margin:0">Your STEPS_TOKEN from .env.local. Saved only in this browser.</p>
+  </form>
+</div>
+
+<header>
+  <div class="brand"><span class="logo">↑</span> Desk Break <span id="demo-badge" class="badge" hidden>Demo</span></div>
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button role="tab" id="tab-day" aria-selected="true">My day</button>
+    <button role="tab" id="tab-live" aria-selected="false">Live &amp; debug</button>
+  </nav>
+  <span class="spacer"></span>
+  <span class="conn" id="conn"><i></i><span>connecting</span></span>
+  <button class="link" id="logout">Sign out</button>
+</header>
+
+<!-- ============ MY DAY ============ -->
+<div class="day" data-tab="day">
+
+  <!-- Setup: shown until the day is started -->
+  <section class="card" id="setup" hidden>
+    <p class="eyebrow" id="setup-date"></p>
+    <h2 id="greeting">Good morning</h2>
+    <p class="sub">Set up today in a few seconds. We'll call you on FaceTime for a quick movement break whenever you've been sitting too long.</p>
+
+    <div class="step">
+      <h3>When are you at your desk?</h3>
+      <div class="hours"><select id="s-start"></select><span class="muted">to</span><select id="s-end"></select></div>
+    </div>
+
+    <div class="step">
+      <h3>How active do you want to be?</h3>
+      <div class="options" id="s-level"></div>
+    </div>
+
+    <div class="step">
+      <div class="summary-line" id="s-stake-locked" hidden></div>
+      <div class="switch" id="s-stake-switch">
+        <div><h3 style="margin:0">Put something on the line</h3><p class="sub small">Optional. Missed check-ins donate to charity, so skipping costs you something.</p></div>
+        <input type="checkbox" id="s-stake-on" aria-label="Put something on the line">
+      </div>
+      <div class="stake-box" id="s-stake" hidden>
+        <div><p class="small muted" style="margin:0 0 6px">Donated per missed check-in</p><div class="chips" id="s-penalty"></div></div>
+        <div class="summary-line" id="s-summary"></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn" id="start-day">Start my day</button>
+      <span class="error" id="setup-error"></span>
+    </div>
+  </section>
+
+  <!-- Day in progress -->
+  <div id="today" hidden>
+    <div class="status" id="status"><div class="icon" id="status-icon">●</div><div><h2 id="status-title"></h2><p id="status-sub"></p></div></div>
+  </div>
+
+  <div class="tiles" id="tiles" hidden>
+    <div class="tile"><div class="label">Check-ins completed</div><div class="value" id="t-done">0</div><div class="note" id="t-done-note"></div></div>
+    <div class="tile"><div class="label">Steps today</div><div class="value" id="t-steps">—</div><div class="note" id="t-steps-note">from your Shortcut</div></div>
+    <div class="tile"><div class="label" id="t-money-label">Mode</div><div class="value" id="t-money">Free</div><div class="note" id="t-money-note"></div></div>
+  </div>
+
+
+  <section class="card" id="stake-card" hidden>
+    <div class="stake-head">
+      <div><p class="eyebrow">Money on the line</p><div class="stake-big" id="k-lost"></div></div>
+      <div class="small muted" id="k-rule" style="text-align:right"></div>
+    </div>
+    <p class="sub small" style="margin-top:8px" id="k-note"></p>
+  </section>
+
+
+  <section class="card" id="settings-card" hidden>
+    <div class="settings-row">
+      <div><p class="eyebrow">Your day</p><p class="sub" id="settings-summary"></p></div>
+      <button class="btn secondary" id="edit-settings">Edit</button>
+    </div>
+    <div id="free-row" class="settings-row" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--line)" hidden>
+      <div><p class="eyebrow">Money on the line</p><p class="sub">Off. Check-ins and coaching only.</p></div>
+      <button class="btn secondary" id="add-stake">Add a stake</button>
+    </div>
+    <div class="stake-box" id="late-stake" hidden>
+      <div><p class="small muted" style="margin:0 0 6px">Donated per missed check-in</p><div class="chips" id="l-penalty"></div></div>
+      <div class="summary-line" id="l-summary"></div>
+      <div class="actions"><button class="btn" id="l-commit">Lock it in for today</button><span class="error" id="l-error"></span></div>
+    </div>
+    <div id="settings-edit" hidden style="margin-top:16px">
+      <div class="hours" style="margin-bottom:12px"><select id="e-start"></select><span class="muted">to</span><select id="e-end"></select></div>
+      <div class="options" id="e-level" style="margin-bottom:12px"></div>
+      <div class="actions"><button class="btn" id="save-settings">Save</button><button class="link" id="cancel-settings">Cancel</button><span class="error" id="settings-error"></span></div>
+    </div>
+    <details style="margin-top:18px">
+      <summary>Wallet details</summary>
+      <dl class="kv">
+        <dt>Available in your wallet</dt><dd id="w-balance">…</dd>
+        <dt>Your wallet</dt><dd id="w-escrow">…</dd>
+        <dt>Donations go to</dt><dd id="w-charity">…</dd>
+        <dt>Network</dt><dd>Solana devnet (test funds)</dd>
+      </dl>
+    </details>
+  </section>
+
+  <section class="card" id="timeline-card" hidden>
+    <h3>History</h3>
+    <ul class="timeline" id="timeline"></ul>
+  </section>
+</div>
+
+<!-- ============ LIVE & DEBUG ============ -->
+<div class="debug" data-tab="live" hidden>
+  <section class="card">
+    <h3>Live</h3>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <span id="d-status" class="pill">idle</span>
+      <button class="btn" id="trigger" style="padding:9px 14px">Trigger random check-in</button>
+    </div>
+    <p class="small muted" style="margin:14px 0 0">Next check-in</p>
+    <div class="big" id="d-countdown">—</div>
+    <p class="small muted" style="margin:0" id="d-next"></p>
+    <div class="grid2">
+      <div class="stat"><span>Challenge</span><b id="d-challenge">—</b></div>
+      <div class="stat"><span>StepStream</span><b id="d-steps">—</b><span id="d-steps-age"></span></div>
+    </div>
+    <div id="d-walk" hidden><div class="small muted" id="d-walk-txt"></div><div class="bar"><span id="d-walk-bar"></span></div></div>
+    <div id="d-reps" hidden><div class="small muted" id="d-reps-txt"></div><div class="bar"><span id="d-reps-bar"></span></div></div>
+    <p class="error" id="trigger-error"></p>
+  </section>
+  <section class="card">
+    <h3>Pose view</h3>
+    <div class="pose"><img id="pose-img" alt="What the rep counter sees" hidden><div class="placeholder" id="pose-ph">The MediaPipe view appears here during a call.</div></div>
+    <p class="small muted" style="margin:8px 0 0">Skeleton and counter state, refreshed every second.</p>
+  </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const sol = n => n == null ? '—' : String(Math.round(n * 1e4) / 1e4);
+const addr = a => `https://explorer.solana.com/address/${a}?cluster=devnet`;
+const short = a => a ? `${a.slice(0, 4)}…${a.slice(-4)}` : '—';
+const clock = iso => iso ? new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+const hourLabel = h => h === 24 ? 'Midnight' : new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const pct = (n, d) => d > 0 ? Math.max(0, Math.min(100, 100 * n / d)) : 0;
+
+// ---------- sign-in ----------
+let token = null;
+try { token = localStorage.getItem('deskcoach.token'); } catch {}
+const hashToken = new URLSearchParams(location.hash.slice(1)).get('token');
+if (hashToken) { token = hashToken; try { localStorage.setItem('deskcoach.token', token); } catch {} history.replaceState(null, '', location.pathname); }
+function showLogin(msg = '') { $('login').style.display = 'grid'; $('login-error').textContent = msg; $('token').focus(); }
+$('login-form').onsubmit = e => { e.preventDefault(); token = $('token').value.trim(); try { localStorage.setItem('deskcoach.token', token); } catch {} $('login').style.display = 'none'; poll(); };
+$('logout').onclick = () => { try { localStorage.removeItem('deskcoach.token'); } catch {} token = null; showLogin(); };
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(opts.headers || {}) } });
+  if (r.status === 401) { showLogin('That token was not accepted.'); throw new Error('unauthorized'); }
+  return r;
+}
+
+// ---------- shared pickers ----------
+const LEVELS = [
+  { steps: 150, name: 'Relaxed', desc: 'A nudge only after a long sit' },
+  { steps: 250, name: 'Balanced', desc: 'A nudge if you barely moved in the last hour' },
+  { steps: 400, name: 'Active', desc: 'Keep me moving often' },
+];
+const PENALTIES = [0.02, 0.05, 0.1];
+function fillHours(sel, from, to, value) { sel.innerHTML = ''; for (let h = from; h <= to; h++) sel.add(new Option(hourLabel(h), h, false, h === value)); }
+function levelPicker(el, value, onPick) {
+  el.innerHTML = LEVELS.map(l => `<button type="button" class="option" data-v="${l.steps}" aria-pressed="${l.steps === value}"><b>${l.name}</b><span>${l.desc} (under ${l.steps} steps)</span></button>`).join('');
+  el.querySelectorAll('.option').forEach(b => b.onclick = () => { el.querySelectorAll('.option').forEach(x => x.setAttribute('aria-pressed', String(x === b))); onPick(+b.dataset.v); });
+}
+function chipPicker(el, values, value, unit, onPick) {
+  el.innerHTML = values.map(v => `<button type="button" class="chip" data-v="${v}" aria-pressed="${v === value}">${v} ${unit}</button>`).join('');
+  el.querySelectorAll('.chip').forEach(b => b.onclick = () => { el.querySelectorAll('.chip').forEach(x => x.setAttribute('aria-pressed', String(x === b))); onPick(+b.dataset.v); });
+}
+const stakeSentence = (penalty, charity, balance) =>
+  `Every missed or unfinished check-in today donates <b>${penalty} SOL</b>${charity ? ` to <a href="${addr(charity)}" target="_blank" rel="noopener">charity</a>` : ' to charity'}. There’s no daily limit, so every miss counts.`
+  + (balance != null ? ` <span class="muted">(Your wallet holds ${sol(balance)} SOL.)</span>` : '');
+
+// ---------- setup form (before the day starts) ----------
+const setup = { start: 9, end: 17, level: 250, stake: false, penalty: 0.05, ready: false };
+function initSetup(d) {
+  if (setup.ready) return;
+  setup.ready = true;
+  setup.start = d.settings.work_start; setup.end = d.settings.work_end;
+  setup.level = LEVELS.some(l => l.steps === d.settings.inactive_steps) ? d.settings.inactive_steps : 250;
+  fillHours($('s-start'), 5, 14, setup.start); fillHours($('s-end'), 12, 24, setup.end);
+  $('s-start').onchange = e => setup.start = +e.target.value; $('s-end').onchange = e => setup.end = +e.target.value;
+  levelPicker($('s-level'), setup.level, v => setup.level = v);
+  chipPicker($('s-penalty'), PENALTIES, setup.penalty, 'SOL', v => { setup.penalty = v; renderSetupSummary(); });
+  $('s-stake-on').onchange = e => { setup.stake = e.target.checked; $('s-stake').hidden = !setup.stake; renderSetupSummary(); };
+}
+function renderSetupSummary() { $('s-summary').innerHTML = stakeSentence(setup.penalty, state?.wallet?.charity, state?.wallet?.escrow_sol); }
+$('start-day').onclick = async () => {
+  $('setup-error').textContent = '';
+  $('start-day').disabled = true;
+  const body = { work_start: setup.start, work_end: setup.end, inactive_steps: setup.level, ...(setup.stake ? { stake: { penalty_sol: setup.penalty } } : {}) };
+  const r = await api('/api/day/start', { method: 'POST', body: JSON.stringify(body) });
+  const j = await r.json();
+  $('start-day').disabled = false;
+  if (!r.ok) $('setup-error').textContent = j.error; else poll();
+};
+
+// ---------- add a stake later (free mode) ----------
+const late = { penalty: 0.05 };
+const lateSummary = () => { $('l-summary').innerHTML = stakeSentence(late.penalty, state?.wallet?.charity, state?.wallet?.escrow_sol); };
+chipPicker($('l-penalty'), PENALTIES, late.penalty, 'SOL', v => { late.penalty = v; lateSummary(); });
+$('add-stake').onclick = () => { $('late-stake').hidden = !$('late-stake').hidden; lateSummary(); };
+$('l-commit').onclick = async () => {
+  $('l-error').textContent = '';
+  const r = await api('/api/stake', { method: 'POST', body: JSON.stringify({ penalty_sol: late.penalty }) });
+  const j = await r.json();
+  if (!r.ok) $('l-error').textContent = j.error; else { $('late-stake').hidden = true; poll(); }
+};
+
+// ---------- settings (after the day starts) ----------
+let editLevel = 250;
+$('edit-settings').onclick = () => {
+  const s = state.settings;
+  fillHours($('e-start'), 5, 14, s.work_start); fillHours($('e-end'), 12, 24, s.work_end);
+  editLevel = s.inactive_steps; levelPicker($('e-level'), editLevel, v => editLevel = v);
+  $('settings-edit').hidden = false; $('edit-settings').hidden = true;
+};
+$('cancel-settings').onclick = () => { $('settings-edit').hidden = true; $('edit-settings').hidden = false; $('settings-error').textContent = ''; };
+$('save-settings').onclick = async () => {
+  const r = await api('/api/settings', { method: 'POST', body: JSON.stringify({ work_start: +$('e-start').value, work_end: +$('e-end').value, inactive_steps: editLevel }) });
+  const j = await r.json();
+  if (!r.ok) { $('settings-error').textContent = j.error; return; }
+  $('cancel-settings').onclick(); poll();
+};
+
+// ---------- the day view ----------
+function attemptStory(a) {
+  const ch = a.challenge || 'a quick challenge';
+  const word = a.reps?.exercise === 'jumping_jack' ? 'jumping jacks' : 'squats';
+  switch (a.outcome) {
+    case 'answered': return { tone: 'good', title: `Completed ${ch}`, sub: 'Nice work' };
+    case 'failed': return a.fail_reason === 'reps'
+      ? { tone: 'bad', title: `Stopped at ${a.reps?.progress ?? 0} of ${a.reps?.target ?? '?'} ${word}`, sub: `Challenge: ${ch}` }
+      : { tone: 'bad', title: `Stopped at ${a.walk?.progress ?? 0} of ${a.walk?.target ?? '?'} steps`, sub: `Challenge: ${ch}` };
+    case 'missed': return { tone: 'bad', title: 'Missed the check-in call', sub: `Challenge was: ${ch}` };
+    case 'error': return { tone: '', title: 'Couldn’t reach you', sub: 'A connection problem on our side, so it doesn’t count against you' };
+    case 'in progress': return { tone: 'warn', title: `On a call: ${ch}`, sub: 'In progress' };
+    default: return { tone: '', title: ch, sub: '' };
+  }
+}
+function moneyCell(a) {
+  const p = a.penalty;
+  if (!p) return '';
+  if (p.status === 'skipped') return `<span class="money free">${p.reason === 'free_mode' ? 'Free mode' : 'Stake used up'}</span>`;
+  const amt = p.sol != null ? `−${sol(p.sol)} SOL` : '';
+  return `<span class="money lost">${amt} donated${p.explorer_url ? ` · <a href="${esc(p.explorer_url)}" target="_blank" rel="noopener">receipt</a>` : ''}</span>`;
+}
+
+function renderDay(d) {
+  const started = Boolean(d.day.started_at);
+  $('setup').hidden = started;
+  ['today', 'tiles', 'timeline-card', 'settings-card'].forEach(id => $(id).hidden = !started);
+  if (!started) $('stake-card').hidden = true;
+  const now = new Date(Date.now() + clockSkew);
+  $('setup-date').textContent = now.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+  const h = now.getHours();
+  $('greeting').textContent = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+  if (!started) {
+    initSetup(d); renderSetupSummary();
+    // A stake already locked today (e.g. set before this screen existed) is shown, not offered again.
+    const locked = d.stake.committed;
+    $('s-stake-switch').hidden = locked; if (locked) $('s-stake').hidden = true;
+    $('s-stake-locked').hidden = !locked;
+    if (locked) $('s-stake-locked').innerHTML = `<b>Already committed today:</b> ${sol(d.stake.penalty_sol)} SOL donated per missed check-in, no daily limit.`;
+    return;
+  }
+
+  // Status banner
+  const cur = d.current, s = d.settings;
+  let tone = '', icon = '✓', title = 'You’re all set', sub = 'We’ll call you for a quick break if you sit too long.';
+  if (cur) {
+    const ringing = /dial|queue|busy|starting/.test(cur.status_detail || '');
+    tone = 'calling'; icon = '📞';
+    title = ringing ? 'Your coach is calling, answer FaceTime' : 'On a call with your coach';
+    sub = cur.challenge_text ? `Today’s challenge: ${cur.challenge_text}` : '';
+  } else if (d.next_call) {
+    tone = 'warn'; icon = '⏳'; title = 'A check-in is on its way'; sub = 'You’ve been sitting a while. Keep your phone close.';
+  } else if (!d.day.in_work_hours) {
+    icon = '🌙'; title = 'Off the clock'; sub = `Check-ins run ${hourLabel(s.work_start)} – ${hourLabel(s.work_end)}.`;
+  } else if (d.last_report) {
+    tone = 'good'; title = 'Watching your activity';
+    sub = `Last update ${clock(d.last_report.at)} · ${d.last_report.steps.toLocaleString()} steps today`;
+  }
+  $('status').className = `status ${tone}`; $('status-icon').textContent = icon; $('status-title').textContent = title; $('status-sub').textContent = sub;
+
+  // Tiles
+  const real = d.attempts.filter(a => a.outcome && !['error', 'in progress'].includes(a.outcome));
+  const done = real.filter(a => a.outcome === 'answered').length;
+  $('t-done').textContent = real.length ? `${done} of ${real.length}` : '0';
+  $('t-done-note').textContent = real.length ? `${Math.round((100 * done) / real.length)}% completed` : 'None yet today';
+  $('t-steps').textContent = d.day.steps != null ? d.day.steps.toLocaleString() : '—';
+  const st = d.stake;
+  if (st.committed) {
+    $('t-money-label').textContent = 'Donated today'; $('t-money').textContent = `${sol(st.lost_sol)} SOL`;
+    $('t-money-note').textContent = `${sol(st.penalty_sol)} SOL per missed check-in`;
+  } else { $('t-money-label').textContent = 'Mode'; $('t-money').textContent = 'Free'; $('t-money-note').textContent = 'No money on the line'; }
+
+  // Stake card (only when committed); free mode shows a small prompt in the settings card instead
+  $('stake-card').hidden = !st.committed;
+  $('free-row').hidden = st.committed;
+  if (st.committed) {
+    $('late-stake').hidden = true;
+    $('k-lost').textContent = st.lost_sol > 0 ? `${sol(st.lost_sol)} SOL donated today` : 'Nothing donated yet';
+    $('k-rule').innerHTML = `${sol(st.penalty_sol)} SOL per missed check-in<br>No daily limit · locked for today`;
+    $('k-note').textContent = st.charged_count ? `${st.charged_count} missed or unfinished check-in${st.charged_count === 1 ? '' : 's'} since you committed at ${clock(st.committed_at)}.` : `Committed at ${clock(st.committed_at)}. Answer every check-in and nothing is donated.`;
+  }
+
+  // Timeline (newest first)
+  $('timeline').innerHTML = d.attempts.length ? d.attempts.map(a => {
+    const s2 = attemptStory(a);
+    return `<li><span class="t">${esc(clock(a.started_at))}</span><span class="dot ${s2.tone}"></span><span class="what"><b>${esc(s2.title)}</b><span>${esc(s2.sub)}</span></span>${moneyCell(a)}</li>`;
+  }).join('') : '<li><span></span><span></span><span class="empty">No check-ins yet. We’ll call you if you sit too long.</span><span></span></li>';
+
+  // Settings + wallet
+  const lvl = LEVELS.find(l => l.steps === s.inactive_steps);
+  $('settings-summary').textContent = `${hourLabel(s.work_start)} – ${hourLabel(s.work_end)} · ${lvl ? lvl.name : `Custom (${s.inactive_steps} steps)`}`;
+  if (d.wallet) {
+    $('w-balance').textContent = `${sol(d.wallet.escrow_sol)} SOL`;
+    $('w-escrow').innerHTML = `<a class="mono" href="${addr(d.wallet.escrow)}" target="_blank" rel="noopener">${short(d.wallet.escrow)}</a>`;
+    $('w-charity').innerHTML = d.wallet.charity ? `<a class="mono" href="${addr(d.wallet.charity)}" target="_blank" rel="noopener">${short(d.wallet.charity)}</a>` : 'not set';
+  }
+}
+
+// ---------- the debug view ----------
+function renderDebug(d) {
+  const cur = d.current;
+  $('d-status').textContent = cur ? `call: ${cur.status_detail}` : d.next_call ? 'scheduled' : d.cooldown_until ? 'cooldown' : 'idle';
+  $('d-status').className = 'pill ' + (cur ? 'good' : d.next_call ? 'warn' : '');
+  $('trigger').disabled = Boolean(cur || d.next_call);
+  $('d-next').textContent = d.next_call ? `Challenge: ${d.next_call.challenge}` : d.cooldown_until && !cur ? `Cooldown until ${clock(d.cooldown_until)} (the button skips it)` : '';
+  $('d-challenge').textContent = cur?.challenge_text ?? (d.next_call ? `${d.next_call.challenge} (next)` : '—');
+  const fresh = d.live_steps && d.live_steps.age_ms < 10000;
+  $('d-steps').textContent = fresh ? d.live_steps.steps : '—';
+  $('d-steps-age').textContent = fresh ? ' steps this session' : d.live_steps ? ` last seen ${Math.round(d.live_steps.age_ms / 1000)} s ago` : ' not sending';
+  const ch = cur?.challenge;
+  $('d-walk').hidden = !(ch && ch.walk > 0);
+  if (ch && ch.walk > 0) { const p = cur.walk?.progress ?? 0; $('d-walk-txt').textContent = `Walk ${p} / ${ch.walk}`; $('d-walk-bar').style.width = pct(p, ch.walk) + '%'; }
+  $('d-reps').hidden = !(ch && ch.reps > 0);
+  if (ch && ch.reps > 0) { const p = cur.reps?.progress ?? 0; $('d-reps-txt').textContent = `Reps ${p} / ${ch.reps}`; $('d-reps-bar').style.width = pct(p, ch.reps) + '%'; }
+}
+function tickCountdown() {
+  const d = state;
+  if (!d || !d.next_call) { $('d-countdown').textContent = d?.current ? 'in call' : '—'; return; }
+  const s = Math.max(0, Math.ceil((Date.parse(d.next_call.at) - (Date.now() + clockSkew)) / 1000));
+  $('d-countdown').textContent = s >= 60 ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : `${s}s`;
+}
+$('trigger').onclick = async () => {
+  $('trigger-error').textContent = ''; $('trigger').disabled = true;
+  const r = await api('/api/trigger', { method: 'POST', body: '{}' });
+  const j = await r.json();
+  if (!r.ok && r.status !== 202) $('trigger-error').textContent = j.error || j.status;
+  else if (j.status && j.status !== 'scheduled') $('trigger-error').textContent = `Not scheduled: ${j.status}`;
+  poll();
+};
+
+// ---------- tabs ----------
+let tab = 'day';
+try { tab = localStorage.getItem('deskcoach.tab') === 'live' ? 'live' : 'day'; } catch {}
+function showTab(t) {
+  tab = t;
+  document.querySelectorAll('[data-tab]').forEach(el => { el.hidden = el.dataset.tab !== t; });
+  $('tab-day').setAttribute('aria-selected', String(t === 'day')); $('tab-live').setAttribute('aria-selected', String(t === 'live'));
+  try { localStorage.setItem('deskcoach.tab', t); } catch {}
+  if (t === 'live') pollPose();
+}
+$('tab-day').onclick = () => showTab('day'); $('tab-live').onclick = () => showTab('live');
+
+// ---------- polling ----------
+let state = null, clockSkew = 0;
+async function poll() {
+  if (!token) return;
+  try {
+    const r = await api('/api/dashboard');
+    if (!r.ok) return;
+    const d = await r.json();
+    state = d; clockSkew = Date.parse(d.now) - Date.now();
+    $('demo-badge').hidden = !d.demo_mode;
+    renderDay(d); renderDebug(d);
+    $('conn').className = 'conn ok'; $('conn').lastElementChild.textContent = 'live';
+  } catch (e) { if (e.message !== 'unauthorized') { $('conn').className = 'conn off'; $('conn').lastElementChild.textContent = 'offline'; } }
+}
+let poseUrl = null;
+async function pollPose() {
+  if (tab !== 'live') return; // camera frames are only fetched on the debug tab
+  if (!token || !state?.calling) { $('pose-img').hidden = true; $('pose-ph').hidden = false; return; }
+  try {
+    const r = await api('/api/pose.jpg');
+    if (r.status !== 200) return;
+    const url = URL.createObjectURL(await r.blob());
+    $('pose-img').src = url; $('pose-img').hidden = false; $('pose-ph').hidden = true;
+    if (poseUrl) URL.revokeObjectURL(poseUrl); poseUrl = url;
+  } catch {}
+}
+setInterval(poll, 1500); setInterval(pollPose, 1000); setInterval(tickCountdown, 250);
+showTab(tab);
+if (token) poll(); else showLogin();
+</script>
+</body>
+</html>

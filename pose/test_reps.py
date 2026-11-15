@@ -242,6 +242,16 @@ check("phone being handled for 3 s: 0 squats", run(handled).counts()["squat"], 0
 c = run(handled + [front_squat(0.0)] * 30 + dips(front_squat, 0.6, 4))
 check("handled, then propped, then 4 real squats: 4", c.counts()["squat"], 4)
 
+# Close to the camera, waist-up: leaning forward makes the shoulders look up to ~35% bigger at the bottom of each
+# squat (and shifts them a little). That must still count, not be mistaken for the phone moving.
+def close_squat(drop: float):
+    p = upper_body(drop)
+    return moved(p, dx=12 * drop, scale=1 + 0.45 * drop)
+
+
+c = run(dips(close_squat, 0.8, 6))
+check("close-up waist-up squats with a forward lean: 6", c.counts()["squat"], 6)
+
 # Too fast to be real: up-down cycles of 0.4 s.
 fast = []
 for _ in range(8):

@@ -41,10 +41,13 @@ MIN_DOWN_S = {"squat": 0.33, "pushup": 0.2, "jumping_jack": 0.0}  # must actuall
 # shift sideways or grow/shrink a lot compared with ~0.5 s ago for several frames in a row, the CAMERA is moving
 # (phone being picked up or propped): stop counting, forget "standing", and wait for the picture to settle.
 MOTION_LOOKBACK_S = 0.5
-MOTION_SHIFT = 0.35      # sideways shift, in shoulder-widths
-MOTION_SCALE = 0.25      # size change (25%)
-MOTION_FRAMES = 3        # consecutive moving frames before it counts as camera motion (1 glitch frame doesn't)
-SETTLE_S = 1.5           # stillness needed after camera motion before counting again
+# Sideways shift is the main signal: handling a phone slides the picture left/right; a squat doesn't. Size alone
+# is NOT a reliable signal: squatting close to the camera leans the upper body toward the lens and makes the
+# shoulders look ~30% bigger at the bottom, so only an extreme size change counts as camera motion.
+MOTION_SHIFT = 0.5       # sideways shift, in shoulder-widths
+MOTION_SCALE = 0.6       # size change (60%) - only extreme changes
+MOTION_FRAMES = 5        # consecutive moving frames (~0.35 s) before it counts as camera motion
+SETTLE_S = 1.0           # stillness needed after camera motion before counting again
 START_SETTLE_S = 1.0     # stillness needed before the first count
 EMA_ALPHA = 0.5
 

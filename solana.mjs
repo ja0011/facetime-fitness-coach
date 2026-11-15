@@ -69,7 +69,7 @@ export function charityAddress() {
  * progress so a crash or retry never sends a second transfer for the same call.
  * @returns the final penalty record: status "confirmed" or "failed" (failed = nothing was paid)
  */
-export async function payPenalty({ date, label = `missed workout ${date}`, prev, save }) {
+export async function payPenalty({ date, label = `missed workout ${date}`, lamports: amount, prev, save }) {
   if (prev?.status === 'confirmed') return prev;
   const connection = await devnet();
 
@@ -85,7 +85,11 @@ export async function payPenalty({ date, label = `missed workout ${date}`, prev,
 
   const escrow = await loadEscrow();
   const to = charityAddress();
-  const lamports = penaltyLamports();
+  // The amount is decided by the caller (the day's committed stake); PENALTY_SOL is only a fallback.
+  const lamports = amount ?? penaltyLamports();
+  if (!Number.isInteger(lamports) || lamports <= 0 || lamports > MAX_PENALTY_SOL * LAMPORTS_PER_SOL) {
+    throw new Error(`penalty must be between 0 and ${MAX_PENALTY_SOL} SOL`);
+  }
   const balance = await connection.getBalance(escrow.publicKey);
   if (balance < lamports + FEE_BUFFER) {
     return save({ status: 'failed', error: `escrow underfunded: has ${balance / LAMPORTS_PER_SOL} SOL`, lamports, at: new Date().toISOString() });
@@ -129,4 +133,14 @@ async function waitFor(connection, rec) {
     await new Promise(r => setTimeout(r, 1000));
   }
   return { status: 'sending', error: 'not confirmed yet; retry later to re-check' };
+}
+
+/** Public info for the dashboard: escrow address + balance, charity address. Never touches the secret key's bytes. */
+export async function walletInfo() {
+  const connection = await devnet();
+  const escrow = (await loadEscrow()).publicKey;
+  const lamports = await connection.getBalance(escrow);
+  let charity = null;
+  try { charity = charityAddress().toBase58(); } catch {}
+  return { escrow: escrow.toBase58(), escrow_sol: lamports / LAMPORTS_PER_SOL, charity, max_penalty_sol: MAX_PENALTY_SOL };
 }

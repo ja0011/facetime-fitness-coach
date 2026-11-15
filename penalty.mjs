@@ -11,7 +11,7 @@ export const CHARGEABLE = new Set(['missed', 'failed']);
  * @param {{ date: string, attempt: object, get: () => object, save: (fields: object) => Promise<object> }} opts
  *   get() re-reads the attempt; save() merges fields into it and persists days.json.
  */
-export async function applyPenalty({ date, attempt, get, save }) {
+export async function applyPenalty({ date, attempt, lamports, get, save }) {
   if (!CHARGEABLE.has(attempt.outcome)) return { skipped: `outcome is ${attempt.outcome ?? 'unknown'}` };
   const key = attempt.call_id || attempt.id;
   const words = { squat: 'squats', pushup: 'push-ups', jumping_jack: 'jumping jacks' }[attempt.reps?.exercise ?? attempt.challenge?.exercise] ?? 'reps';
@@ -24,6 +24,7 @@ export async function applyPenalty({ date, attempt, get, save }) {
   const penalty = await payPenalty({
     date,
     label,
+    lamports, // decided by server.mjs from the day's committed stake
     prev: attempt.penalty,
     save: async p => (await save({ penalty: p })).penalty,
   });

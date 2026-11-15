@@ -7,6 +7,10 @@
 export const DEMO_MODE = process.env.DEMO_MODE === '1';
 export const INACTIVE_STEPS = Number(process.env.INACTIVE_STEPS || 250);
 const ALLOW_JACKS = process.env.CHALLENGE_JACKS === '1'; // jumping jacks are off by default (less tested counter)
+// Rep challenges (squats/jacks counted by the MediaPipe pose worker) are OFF by default: camera framing made the
+// counter unreliable, and a wrong count costs money when staked. Walks (counted by StepStream) only.
+// CHALLENGE_REPS=1 turns squats back on.
+export const ALLOW_REPS = process.env.CHALLENGE_REPS === '1';
 
 export const EXERCISE_WORDS = { squat: 'squats', pushup: 'push-ups', jumping_jack: 'jumping jacks' };
 
@@ -21,9 +25,9 @@ const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 /**
  * @param {{ stepsSince?: number | null }} [ctx] steps since the previous report (fewer = sat longer = harder)
  */
-export function pickChallenge({ stepsSince = null, kind: wantKind = null } = {}) {
+export function pickChallenge({ stepsSince = null, kind: wantKind = null, inactiveSteps = INACTIVE_STEPS } = {}) {
   // Severity 0..1: 0 steps since the last report = 1 (hardest); at the inactivity threshold = 0 (easiest).
-  const severity = stepsSince == null ? 0.5 : clamp(1 - stepsSince / INACTIVE_STEPS, 0, 1);
+  const severity = stepsSince == null ? 0.5 : clamp(1 - stepsSince / inactiveSteps, 0, 1);
   const sized = ([lo, hi], scale = 1) => {
     // Mostly set by severity, with a little randomness so two calls aren't identical.
     const t = clamp(severity + rand(-0.15, 0.15), 0, 1);
@@ -32,7 +36,8 @@ export function pickChallenge({ stepsSince = null, kind: wantKind = null } = {})
   const kinds = ['walk', 'reps', 'walk+reps'];
   // For testing: force the type ("walk", "squats"/"reps", "walk+squats"); the size is still random and scaled.
   const forced = { walk: 'walk', squats: 'reps', reps: 'reps', jacks: 'reps', 'walk+squats': 'walk+reps', 'walk+reps': 'walk+reps', both: 'walk+reps' }[wantKind];
-  const kind = forced ?? kinds[Math.floor(Math.random() * kinds.length)];
+  const picked = forced ?? kinds[Math.floor(Math.random() * kinds.length)];
+  const kind = ALLOW_REPS ? picked : 'walk'; // reps disabled: every challenge is a walk
   const exercise = wantKind === 'jacks' ? 'jumping_jack' : ALLOW_JACKS && !forced && Math.random() < 0.3 ? 'jumping_jack' : 'squat';
   // Both parts in one call: trim each a little so the pair still fits the 5-minute call cap.
   const both = kind === 'walk+reps';

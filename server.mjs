@@ -23,10 +23,12 @@ import { pathToFileURL } from 'node:url';
 import { placeCall } from './outbound.mjs';
 import { applyPenalty, CHARGEABLE } from './penalty.mjs';
 import { DEMO_MODE, describeChallenge, INACTIVE_STEPS, pickChallenge } from './challenge.mjs';
+import { walletInfo } from './solana.mjs';
 
 const PORT = Number(process.env.PORT || 3000);
 // Inactivity check-ins. DEMO_MODE=1: a 5-20 second delay, work hours ignored, first report of the day counts as inactive.
-const [WORK_START, WORK_END] = (process.env.WORK_HOURS || '9-17').split('-').map(Number);
+// Defaults from .env.local; the dashboard can change them (saved in data/activity.json as "settings").
+const [ENV_WORK_START, ENV_WORK_END] = (process.env.WORK_HOURS || '9-17').split('-').map(Number);
 const DELAY_MIN_MS = DEMO_MODE ? 5_000 : 60_000 * Number(process.env.RANDOM_DELAY_MIN || 5);
 const DELAY_MAX_MS = DEMO_MODE ? 20_000 : 60_000 * Number(process.env.RANDOM_DELAY_MAX || 30);
 const TOKEN = process.env.STEPS_TOKEN;
@@ -155,9 +157,48 @@ async function handleWalkProgress(body) {
 const penaltyRuns = new Map(); // attempt id -> promise, so two triggers for one call never run at once
 
 /** Runs (or joins) the penalty for one attempt. Only missed/failed attempts are charged; see penalty.mjs. */
+// ---- stake: penalties only charge when you've committed for the day. No daily cap: every missed or unfinished
+// check-in donates the chosen amount, as long as the wallet can pay (payPenalty refuses if it can't). ----
+const LAMPORTS = 1_000_000_000;
+const solOf = x => Math.round(Number(x || 0) * LAMPORTS) / LAMPORTS;
+/** Committed / lost / remaining for a day. "Lost" counts confirmed penalties plus ones being sent (reserved). */
+function stakeStatus(date) {
+  const st = day(date).stake;
+  // Only penalties paid under THIS stake count (a stake removed and re-added later starts fresh).
+  const since = st?.committed_at ? Date.parse(st.committed_at) : 0;
+  const charged = day(date).attempts.filter(a => a.penalty?.under_stake && ['confirmed', 'sending'].includes(a.penalty.status)
+    && Date.parse(a.penalty.at ?? a.started_at) >= since);
+  const lost = solOf(charged.reduce((sum, a) => sum + (a.penalty.sol ?? a.penalty_planned_sol ?? 0), 0));
+  if (!st?.committed) return { committed: false, lost };
+  return { committed: true, penalty_sol: st.penalty_sol, committed_at: st.committed_at, lost_sol: lost, charged_count: charged.length };
+}
+
+/** Decide whether and how much this attempt is charged, BEFORE paying, and save it on the attempt. */
+async function planPenalty(date, id) {
+  const a = findAttempt(date, id);
+  if (a.penalty?.status === 'confirmed' || a.penalty?.status === 'sending') return a.penalty_planned_sol ?? a.penalty.sol; // resume
+  if (a.penalty?.status === 'skipped') return null; // final: a free-mode miss is never charged later
+  if (a.penalty_planned_sol) return a.penalty_planned_sol; // amount already fixed (retry)
+  const st = stakeStatus(date);
+  if (!st.committed) {
+    await updateAttempt(date, id, { penalty: { status: 'skipped', reason: 'free_mode' } });
+    return null;
+  }
+  const charge = solOf(st.penalty_sol); // no daily cap; the wallet balance is checked when paying
+  await updateAttempt(date, id, { penalty_planned_sol: charge });
+  return charge;
+}
+
 function runPenalty(date, id) {
   if (!penaltyRuns.has(id)) {
-    const run = applyPenalty({ date, attempt: findAttempt(date, id), get: () => findAttempt(date, id), save: f => updateAttempt(date, id, f) })
+    const run = (async () => {
+      const sol = await planPenalty(date, id);
+      if (sol == null) return { skipped: findAttempt(date, id).penalty?.reason ?? 'no_penalty' };
+      return applyPenalty({
+        date, attempt: findAttempt(date, id), lamports: Math.round(sol * LAMPORTS), get: () => findAttempt(date, id),
+        save: f => updateAttempt(date, id, f.penalty ? { ...f, penalty: { ...f.penalty, under_stake: true } } : f),
+      });
+    })()
       .then(r => { log('penalty', { date, attempt: id, penalty: r.penalty?.status, signature: r.penalty?.signature, notify: r.notify?.status, notify_error: r.notify?.error, skipped: r.skipped, error: r.penalty?.error }); return r; })
       .catch(async err => { log('penalty error', { date, attempt: id, error: err.message }); await updateAttempt(date, id, { penalty_error: err.message }); return { error: err.message }; })
       .finally(() => penaltyRuns.delete(id));
@@ -253,15 +294,20 @@ async function runCall(date, id) {
 
 // ---- routes ----
 // ---- inactivity tracking and the scheduled call ----
-let activity = { last: null, scheduled: null };
+let activity = { last: null, scheduled: null, settings: null };
 try { activity = { ...activity, ...JSON.parse(await readFile(ACTIVITY_FILE, 'utf8')) }; } catch {}
+const settings = () => ({
+  work_start: activity.settings?.work_start ?? ENV_WORK_START,
+  work_end: activity.settings?.work_end ?? ENV_WORK_END,
+  inactive_steps: activity.settings?.inactive_steps ?? INACTIVE_STEPS,
+});
 async function saveActivity() {
   await mkdir(DATA_DIR, { recursive: true });
   const tmp = new URL('activity.json.tmp', DATA_DIR);
   await writeFile(tmp, JSON.stringify(activity, null, 2));
   await rename(tmp, ACTIVITY_FILE);
 }
-const inWorkHours = (d = new Date()) => d.getHours() >= WORK_START && d.getHours() < WORK_END;
+const inWorkHours = (d = new Date()) => d.getHours() >= settings().work_start && d.getHours() < settings().work_end;
 let scheduleTimer = null;
 
 function armSchedule() {
@@ -303,6 +349,7 @@ async function handleSteps(req, res) {
   if (!Number.isFinite(steps) || steps < 0) return send(res, 400, { error: 'steps must be a non-negative number' });
   const date = /^\d{4}-\d{2}-\d{2}$/.test(body.date || '') ? body.date : localDate();
   const force = body.force === true; // demos: skip the cooldown
+  const manual = body.manual === true; // dashboard "Trigger" button: also ignores work hours
   const now = new Date();
 
   // Steps since the previous report (the Shortcut sends today's running total).
@@ -320,10 +367,13 @@ async function handleSteps(req, res) {
   await updateDay(date, { steps });
   log('steps received', { date, steps, steps_since: stepsSince, minutes_since: minutesSince, demo: DEMO_MODE });
 
-  const base = { date, steps, steps_since: stepsSince, minutes_since: minutesSince, inactive_below: INACTIVE_STEPS, demo: DEMO_MODE };
+  const { inactive_steps: inactiveSteps, work_start: workStart, work_end: workEnd } = settings();
+  const base = { date, steps, steps_since: stepsSince, minutes_since: minutesSince, inactive_below: inactiveSteps, demo: DEMO_MODE };
   if (stepsSince == null) return send(res, 200, { status: 'baseline', ...base, note: 'First report today: saved as the starting point.' });
-  if (stepsSince >= INACTIVE_STEPS) return send(res, 200, { status: 'active', ...base });
-  if (!DEMO_MODE && !inWorkHours(now)) return send(res, 200, { status: 'outside_work_hours', ...base, work_hours: `${WORK_START}-${WORK_END}` });
+  if (stepsSince >= inactiveSteps) return send(res, 200, { status: 'active', ...base });
+  // Check-ins only run once you've pressed "Start my day" (the dashboard's Trigger button bypasses this).
+  if (!day(date).started_at && !manual) return send(res, 200, { status: 'day_not_started', ...base });
+  if (!DEMO_MODE && !manual && !inWorkHours(now)) return send(res, 200, { status: 'outside_work_hours', ...base, work_hours: `${workStart}-${workEnd}` });
   if (activity.scheduled) return send(res, 200, { status: 'already_scheduled', ...base, call_at: activity.scheduled.at, challenge: describeChallenge(activity.scheduled.challenge) });
   if (callInProgress) return send(res, 409, { status: 'call_in_progress', ...base });
   const { callsToday, cooldownUntil } = callBudget(date);
@@ -332,7 +382,7 @@ async function handleSteps(req, res) {
 
   // Inactive: pick the challenge now (scaled to how little they moved) and call at a random time soon.
   // Optional "challenge": "walk" | "squats" | "walk+squats" (testing / demos); otherwise random.
-  const challenge = pickChallenge({ stepsSince, kind: typeof body.challenge === 'string' ? body.challenge.toLowerCase() : null });
+  const challenge = pickChallenge({ stepsSince, inactiveSteps, kind: typeof body.challenge === 'string' ? body.challenge.toLowerCase() : null });
   const delayMs = Math.round(DELAY_MIN_MS + Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS));
   // The delay counts from NOW (after any slow saves above), not from when the request arrived, and the timer is
   // armed before saving: a file save stalled by iCloud Desktop sync once made a "13 s" call fire immediately.
@@ -356,10 +406,126 @@ async function handlePenaltyRetry(body) {
   return { date, retried: targets.map(a => a.id), attempts: day(date).attempts.filter(a => CHARGEABLE.has(a.outcome)).map(a => ({ id: a.id, outcome: a.outcome, penalty: a.penalty?.status ?? null, signature: a.penalty?.signature ?? null, notify: a.notify?.status ?? null })) };
 }
 
+// ---- dashboard API (token required; see dashboard.html) ----
+let walletCache = { at: 0, value: null, error: null };
+async function cachedWallet() {
+  if (Date.now() - walletCache.at < 15_000) return walletCache;
+  try { walletCache = { at: Date.now(), value: await walletInfo(), error: null }; }
+  catch (err) { walletCache = { at: Date.now(), value: walletCache.value, error: err.message }; }
+  return walletCache;
+}
+const POSE_FRAME_URL = `http://127.0.0.1:${process.env.POSE_DEBUG_PORT || 8090}/frame.jpg`;
+
+function validateSettings(b) {
+  const ws = Number(b.work_start), we = Number(b.work_end), th = Number(b.inactive_steps);
+  if (![ws, we].every(h => Number.isInteger(h) && h >= 0 && h <= 24) || ws >= we) return 'Work hours must be whole hours, and the end must be after the start.';
+  if (!Number.isInteger(th) || th < 10 || th > 5000) return 'The activity level must be between 10 and 5000 steps.';
+  return null;
+}
+
+/** Commit today: every missed or unfinished check-in donates penaltyIn SOL (no daily cap). Locked for the day. */
+async function commitStake(date, penaltyIn) {
+  if (day(date).stake?.committed) return { status: 409, error: 'You’ve already committed for today.' };
+  const penalty = solOf(penaltyIn);
+  const w = (await cachedWallet()).value;
+  if (!(penalty > 0)) return { status: 400, error: 'Choose an amount above 0 SOL.' };
+  if (w && penalty > w.max_penalty_sol) return { status: 400, error: `A single donation is capped at ${w.max_penalty_sol} SOL as a safety limit.` };
+  if (w && penalty > w.escrow_sol) return { status: 400, error: `Your wallet holds ${w.escrow_sol} SOL, not enough for even one donation of ${penalty} SOL.` };
+  await updateDay(date, { stake: { committed: true, penalty_sol: penalty, committed_at: new Date().toISOString() } });
+  log('stake committed', { date, penalty_sol: penalty, daily_cap: 'none' });
+  return null;
+}
+
+async function handleApi(req, res, url) {
+  const date = localDate();
+  if (req.method === 'GET' && url.pathname === '/api/dashboard') {
+    const rec = day(date);
+    const current = callInProgress ? [...rec.attempts].reverse().find(a => a.status === 'calling') : null;
+    const sch = activity.scheduled;
+    const w = await cachedWallet();
+    return send(res, 200, {
+      now: new Date().toISOString(), date, demo_mode: DEMO_MODE,
+      day: { started_at: rec.started_at ?? null, steps: rec.steps ?? null, in_work_hours: DEMO_MODE || inWorkHours() },
+      settings: settings(),
+      stake: stakeStatus(date),
+      wallet: w.value, wallet_error: w.error,
+      next_call: sch ? { at: sch.at, challenge: describeChallenge(sch.challenge), steps_since: sch.steps_since } : null,
+      last_report: activity.last,
+      calling: Boolean(callInProgress),
+      current: current && { id: current.id, status_detail: current.status_detail ?? 'starting', challenge: current.challenge,
+        challenge_text: current.challenge ? describeChallenge(current.challenge) : null, walk: current.walk ?? null, reps: current.reps ?? null },
+      live_steps: live ? { ...live, age_ms: Date.now() - Date.parse(live.updated_at) } : null,
+      cooldown_until: callBudget(date).cooldownUntil,
+      attempts: rec.attempts.map(a => ({
+        id: a.id, started_at: a.started_at, trigger: a.trigger ?? (a.forced ? 'forced' : 'steps'), forced: a.forced ?? false,
+        challenge: a.challenge ? describeChallenge(a.challenge) : null, outcome: a.outcome ?? (a.status === 'calling' ? 'in progress' : null),
+        fail_reason: a.fail_reason ?? null, walk: a.walk ?? null, reps: a.reps ?? null,
+        penalty: a.penalty ? { status: a.penalty.status, sol: a.penalty.sol ?? a.penalty_planned_sol ?? null, reason: a.penalty.reason ?? null,
+          explorer_url: a.penalty.explorer_url ?? null, under_stake: a.penalty.under_stake ?? false } : null,
+      })).reverse(),
+    });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/pose.jpg') {
+    // The pose worker serves its frame on localhost only; this forwards it behind the token (works via the tunnel).
+    try {
+      const r = await fetch(POSE_FRAME_URL, { signal: AbortSignal.timeout(1500) });
+      if (r.status !== 200) return send(res, 204, {});
+      res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'no-store' });
+      return res.end(Buffer.from(await r.arrayBuffer()));
+    } catch { res.writeHead(204); return res.end(); }
+  }
+  let body;
+  try { body = await readJson(req); } catch { return send(res, 400, { error: 'invalid_json' }); }
+  if (req.method === 'POST' && url.pathname === '/api/settings') {
+    const bad = validateSettings(body);
+    if (bad) return send(res, 400, { error: bad });
+    activity.settings = { work_start: Number(body.work_start), work_end: Number(body.work_end), inactive_steps: Number(body.inactive_steps) };
+    await saveActivity();
+    log('settings changed', activity.settings);
+    return send(res, 200, { ok: true, settings: settings() });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/stake') {
+    const err = await commitStake(date, body.penalty_sol);
+    if (err) return send(res, err.status, { error: err.error });
+    return send(res, 200, { ok: true, stake: stakeStatus(date) });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/day/start') {
+    // "Start my day": settings + optional stake, validated together so a bad stake doesn't half-start the day.
+    if (day(date).started_at) return send(res, 409, { error: 'Your day has already started.' });
+    const bad = validateSettings(body);
+    if (bad) return send(res, 400, { error: bad });
+    if (body.stake && !day(date).stake?.committed) { // a stake already locked today is kept as is
+      const err = await commitStake(date, body.stake.penalty_sol);
+      if (err) return send(res, err.status, { error: err.error });
+    }
+    activity.settings = { work_start: Number(body.work_start), work_end: Number(body.work_end), inactive_steps: Number(body.inactive_steps) };
+    await saveActivity();
+    await updateDay(date, { started_at: new Date().toISOString() });
+    log('day started', { date, ...activity.settings, staked: Boolean(body.stake) });
+    return send(res, 200, { ok: true });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/trigger') {
+    // Same path as the Shortcut, with force (skips the cooldown) and "no new steps" since the last report.
+    if (callInProgress) return send(res, 409, { error: 'A call is already in progress.' });
+    if (activity.scheduled) return send(res, 409, { error: 'A check-in is already scheduled.', call_at: activity.scheduled.at });
+    // No report yet today: seed one so this press counts as "no steps since", not just a starting point.
+    if (activity.last?.date !== date) activity.last = { at: new Date().toISOString(), date, steps: 0 };
+    const steps = activity.last.steps;
+    const fake = { headers: {}, [Symbol.asyncIterator]: async function* () { yield JSON.stringify({ steps, force: true, manual: true, challenge: body.challenge || undefined }); } };
+    return handleSteps(fake, res);
+  }
+  return send(res, 404, { error: 'not_found' });
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
     if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true });
+    // The page itself has no secrets; it asks for the token and sends it on every /api call.
+    if (req.method === 'GET' && (url.pathname === '/dashboard' || url.pathname === '/dashboard/')) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end(await readFile(new URL('./dashboard.html', import.meta.url)));
+    }
     if (!authorized(req)) return send(res, 401, { error: 'unauthorized' });
     if (req.method === 'POST' && url.pathname === '/steps') return await handleSteps(req, res);
     if (url.pathname === '/live-steps') {
@@ -379,6 +545,7 @@ const server = createServer(async (req, res) => {
       let body; try { body = await readJson(req); } catch { return send(res, 400, { error: 'invalid_json' }); }
       return send(res, 200, await handlePenaltyRetry(body));
     }
+    if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
     if (req.method === 'GET' && url.pathname === '/status') {
       const date = url.searchParams.get('date') || localDate();
       const rec = days[date] ?? { attempts: [] };
@@ -388,7 +555,7 @@ const server = createServer(async (req, res) => {
         date, steps: rec.steps ?? null, calling: Boolean(callInProgress), demo_mode: DEMO_MODE,
         last_report: activity.last,
         next_call: sch ? { at: sch.at, in_seconds: Math.max(0, Math.round((Date.parse(sch.at) - Date.now()) / 1000)), challenge: describeChallenge(sch.challenge), steps_since: sch.steps_since } : null,
-        inactive_below: INACTIVE_STEPS, work_hours: DEMO_MODE ? 'ignored (demo)' : `${WORK_START}-${WORK_END}`,
+        inactive_below: settings().inactive_steps, work_hours: DEMO_MODE ? 'ignored (demo)' : `${settings().work_start}-${settings().work_end}`,
         calls_today: callsToday, max_calls_per_day: maxLabel, cooldown_until: cooldownUntil,
         attempts: rec.attempts,
       });
@@ -400,5 +567,6 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => log('step server listening', { port: PORT, demo: DEMO_MODE, inactive_below: INACTIVE_STEPS,
-  work_hours: DEMO_MODE ? 'ignored' : `${WORK_START}-${WORK_END}`, delay_s: [DELAY_MIN_MS / 1000, DELAY_MAX_MS / 1000], cooldown_min: CALL_COOLDOWN_MS / 60_000 }));
+server.listen(PORT, '0.0.0.0', () => log('step server listening', { port: PORT, demo: DEMO_MODE, inactive_below: settings().inactive_steps,
+  work_hours: DEMO_MODE ? 'ignored' : `${settings().work_start}-${settings().work_end}`, delay_s: [DELAY_MIN_MS / 1000, DELAY_MAX_MS / 1000],
+  cooldown_min: CALL_COOLDOWN_MS / 60_000, dashboard: `http://localhost:${PORT}/dashboard` }));
