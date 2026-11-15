@@ -30,11 +30,20 @@ from livekit import rtc  # noqa: E402
 from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli  # noqa: E402
 from mediapipe.tasks.python import BaseOptions, vision  # noqa: E402
 
-from reps import RepCounter, to_points  # noqa: E402
+from reps import NOSE, L_HIP, R_HIP, RepCounter, to_points  # noqa: E402
+
+DEBUG_VIEW = None
+if os.environ.get("POSE_DEBUG_VIEW", "1") != "0":
+    from debug_view import DebugView  # noqa: E402
+    DEBUG_VIEW = DebugView()
 
 POSE_AGENT_NAME = os.environ.get("POSE_AGENT_NAME") or f"{os.environ.get('AGENT_NAME', 'my-agent')}-pose"
 MODEL_PATH = ROOT / "models" / os.environ.get("POSE_MODEL", "pose_landmarker_full.task")
 TOPIC = "chert.reps"
+# Auto-rotate: the FaceTime bridge doesn't rotate a sideways phone's picture, so the person can arrive lying on their
+# side. Off for push-ups, where a horizontal body is the real pose.
+AUTO_ROTATE = os.environ.get("POSE_AUTO_ROTATE", "1") != "0" and os.environ.get("REPS_EXERCISE", "squat") != "pushup"
+ROTATE_AFTER_FRAMES = 30  # ~2 s of a clearly sideways body -> turn the picture (a squat lean lasts ~1 s)
 STATS_EVERY_S = 5.0
 HEARTBEAT_S = 2.0  # send counts at least this often so the coach knows the counter is alive
 
@@ -61,11 +70,35 @@ def make_landmarker():
     return vision.PoseLandmarker.create_from_options(options)
 
 
+def upright_fix(pts) -> int | None:
+    """Quarter turns (np.rot90 k, counter-clockwise) that would put the head above the hips. 0 = already upright,
+    None = can't tell (head or hips not visible)."""
+    hips = [pts[i] for i in (L_HIP, R_HIP) if pts[i].ok]
+    if not pts[NOSE].ok or not hips:
+        return None
+    hx = sum(p.x for p in hips) / len(hips)
+    hy = sum(p.y for p in hips) / len(hips)
+    dx, dy = pts[NOSE].x - hx, pts[NOSE].y - hy  # image coords: y grows downward
+    if dy > 2 * abs(dx):
+        return 2       # head clearly below hips: upside down
+    if abs(dx) > 2 * abs(dy):
+        return 1 if dx > 0 else -1  # head clearly to the side: counter-clockwise if right, clockwise if left
+    return 0           # upright, or leaning (e.g. forward in a squat): leave the picture alone
+
+
 def is_caller(p: rtc.RemoteParticipant) -> bool:
     return p.identity.startswith("chert-bridge-") or p.kind != rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
 
 
 async def entrypoint(ctx: JobContext):
+    try:
+        await run_job(ctx)
+    finally:
+        if DEBUG_VIEW:
+            await DEBUG_VIEW.stop()  # always free the viewer port for the next call, whatever happened
+
+
+async def run_job(ctx: JobContext):
     await ctx.connect(auto_subscribe=AutoSubscribe.VIDEO_ONLY)
     log.info("joined room %s", ctx.room.name)
     landmarker = make_landmarker()
@@ -113,8 +146,10 @@ async def entrypoint(ctx: JobContext):
     busy = False
     stats = dict(received=0, processed=0, visible=0, knee=0, hip=0, infer_ms=0.0, w=0, h=0, rot=0)
     stats_at = time.monotonic()
+    reasons: dict[str, int] = {}  # why visible frames gave no squat reading
     last_sent = 0.0
     last_counts = counter.counts()
+    orient = dict(k=0, wrong=0, want=0)  # extra quarter turns (np.rot90 k) to make the person upright
 
     def infer(rgb: np.ndarray, ts_ms: int):
         start = time.perf_counter()
@@ -125,18 +160,41 @@ async def entrypoint(ctx: JobContext):
         nonlocal busy, last_sent, last_counts
         try:
             rgb = np.frombuffer(frame.data, dtype=np.uint8).reshape(frame.height, frame.width, 3)
-            k = ROTATE_K.get(rotation, 0)
+            k = (ROTATE_K.get(rotation, 0) + orient["k"]) % 4
             rgb = np.ascontiguousarray(np.rot90(rgb, k) if k else rgb)  # copy: the frame buffer is reused
             h, w = rgb.shape[:2]
             result, ms = await loop.run_in_executor(pool, infer, rgb, ts_ms)
             stats["processed"] += 1
             stats["infer_ms"] += ms
             pts = to_points(result.pose_landmarks[0], w, h) if result.pose_landmarks else None
+            if AUTO_ROTATE and pts:
+                fix = upright_fix(pts)
+                if fix is None or fix == 0:
+                    orient["wrong"] = 0
+                else:
+                    orient["wrong"] = orient["wrong"] + 1 if fix == orient["want"] else 1
+                    orient["want"] = fix
+                    if orient["wrong"] >= ROTATE_AFTER_FRAMES:
+                        orient["k"] = (orient["k"] + fix) % 4
+                        orient["wrong"] = 0
+                        # The picture changed: forget the standing reference so the next squats measure correctly.
+                        counter.ref_hip_y = counter.ref_torso = counter.ref_offset = None
+                        counter.machines["squat"].state = "up"
+                        log.info("person looked sideways/upside-down: rotating the picture %d quarter turn(s) (total %d)", fix, orient["k"])
+                        return  # this frame was analyzed in the old orientation
             reps_done = counter.update(pts, ts_ms / 1000)
+            if DEBUG_VIEW:
+                had = DEBUG_VIEW.runner is not None
+                await DEBUG_VIEW.ensure_started()
+                if DEBUG_VIEW.runner is not None and not had:
+                    log.info("debug view: http://localhost:%d", int(os.environ.get("POSE_DEBUG_PORT", 8090)))
+                DEBUG_VIEW.update(rgb, pts, counter, dict(rotate_k=orient["k"], w=w, h=h, ms=ms))
             stats["visible"] += counter.visible
             if counter.squat_mode:
                 for part in counter.squat_mode.split("+"):
-                    stats[part] += 1
+                    stats[part] = stats.get(part, 0) + 1
+            elif counter.visible and counter.no_signal:
+                reasons[counter.no_signal] = reasons.get(counter.no_signal, 0) + 1
             counts = counter.counts()
             now = time.monotonic()
             if reps_done or counts != last_counts or now - last_sent >= HEARTBEAT_S:
@@ -158,11 +216,14 @@ async def entrypoint(ctx: JobContext):
         if now - stats_at >= STATS_EVERY_S:
             span = now - stats_at
             n = stats["processed"]
-            log.info("camera %dx%d rot=%s | received %.1f fps | processed %.1f fps | body visible %d%% (squat: knee %d%%, hip %d%%) | inference %.0f ms",
+            log.info("camera %dx%d rot=%s | received %.1f fps | processed %.1f fps | body visible %d%% (squat: head %d%%, knee %d%%, hip %d%%) | inference %.0f ms",
                      stats["w"], stats["h"], rtc.VideoRotation.Name(stats["rot"]) if isinstance(stats["rot"], int) else stats["rot"],
                      stats["received"] / span, n / span, (100 * stats["visible"] / n) if n else 0,
-                     (100 * stats["knee"] / n) if n else 0, (100 * stats["hip"] / n) if n else 0, (stats["infer_ms"] / n) if n else 0)
-            stats.update(received=0, processed=0, visible=0, knee=0, hip=0, infer_ms=0.0)
+                     (100 * stats.get("head", 0) / n) if n else 0, (100 * stats["knee"] / n) if n else 0, (100 * stats["hip"] / n) if n else 0, (stats["infer_ms"] / n) if n else 0)
+            if reasons:
+                log.info("no squat reading on %d visible frames: %s", sum(reasons.values()), reasons)
+                reasons.clear()
+            stats.update(received=0, processed=0, visible=0, head=0, knee=0, hip=0, infer_ms=0.0)
             stats_at = now
         # "Every frame it can": skip frames that arrive while the previous one is still being analyzed.
         if busy:
@@ -173,6 +234,8 @@ async def entrypoint(ctx: JobContext):
         asyncio.create_task(process(frame, event.rotation, ts_ms))
 
     log.info("camera stream ended; final counts %s", counter.counts())
+    if DEBUG_VIEW:
+        DEBUG_VIEW.clear()
     landmarker.close()
 
 

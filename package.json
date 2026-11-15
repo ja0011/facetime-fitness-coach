@@ -13,7 +13,7 @@
     "call": "node --env-file=.env.local outbound.mjs",
     "server": "node --env-file=.env.local server.mjs",
     "wallet": "node --env-file=.env.local wallet.mjs",
-    "pose": "pose/.venv/bin/python pose/pose_worker.py start",
+    "pose": "pose/.venv/bin/python -u pose/pose_worker.py start",
     "pose:setup": "bash pose/setup.sh",
     "pose:test": "pose/.venv/bin/python -I pose/test_reps.py"
   },

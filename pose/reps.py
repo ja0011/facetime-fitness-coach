@@ -32,17 +32,24 @@ SIDES = {
     "right": dict(shoulder=R_SHOULDER, elbow=R_ELBOW, wrist=R_WRIST, hip=R_HIP, knee=R_KNEE, ankle=R_ANKLE),
 }
 
-MIN_VISIBILITY = 0.6
-EDGE_MARGIN = 0.02  # a landmark this close to (or past) the frame edge counts as out of frame
-MIN_REP_S = 0.5
+MIN_VISIBILITY = 0.5  # loosened for the demo: use joints MediaPipe is only fairly sure of
+EDGE_MARGIN = 0.0  # loosened: a joint right at the frame edge still counts
+MIN_REP_S = 0.4
 EMA_ALPHA = 0.5
 
 EXERCISES = ("squat", "pushup", "jumping_jack")
 
-HIP_DOWN = 0.35  # hip drop (torso-lengths) that counts as "down" (a normal squat drops ~0.5-1.0)
-HIP_UP = 0.15    # back within this = "up"
+# Loosened for the demo: a partial squat counts. Missing a real rep is worse than the odd extra one.
+HIP_DOWN = 0.22  # hip drop (torso-lengths) that counts as "down" (a full squat drops ~0.5-1.0)
+HIP_UP = 0.10    # back within this = "up"
 REF_ALPHA = 0.2  # how fast the standing reference adapts (only while standing)
-RESCALE = (0.75, 1.33)  # torso length outside this ratio of the reference = the person moved: re-learn, don't count
+# Head tracking (primary squat signal): the "head line" = average height of nose and shoulders, measured in
+# shoulder-widths below where it sits when standing. A nod moves only the nose, so the head line barely moves.
+HEAD_DOWN = 0.4  # ~15 cm for an adult: a partial squat is enough
+HEAD_UP = 0.15
+RESCALE = (0.6, 1.6)  # torso length outside this ratio of the reference ...
+RESCALE_FRAMES = 8     # ... for this many frames in a row (~0.5 s) = the person really moved: re-learn, don't count.
+                       # One noisy frame (a joint MediaPipe is unsure of) must not wipe the standing reference.
 
 
 @dataclass
@@ -131,6 +138,14 @@ class RepCounter:
     visible: bool = False
     squat_mode: str | None = None  # "hip+knee", "hip", "knee" or None (which signals this frame had)
     ema: dict[str, float] = field(default_factory=dict)
+    out_of_scale: int = 0               # consecutive frames with an unusual torso size
+    no_signal: str | None = None        # why this frame gave no squat reading (for the worker's 5 s stats)
+    last_drop: float | None = None      # latest hip drop (torso-lengths), for the debug viewer
+    last_knee: float | None = None      # latest knee angle (deg), for the debug viewer
+    last_head: float | None = None      # latest head drop (shoulder-widths), for the debug viewer
+    ref_head_y: float | None = None     # head line height when standing
+    ref_head_scale: float | None = None # shoulder width (px) when standing
+    head_out_of_scale: int = 0          # consecutive frames with an unusual shoulder width
     # Fallback reference, learned while standing: where the hips sit, torso length, and shoulder-to-hip offset.
     ref_hip_y: float | None = None
     ref_torso: float | None = None
@@ -154,8 +169,9 @@ class RepCounter:
         # Shoulders alone are enough once the standing reference is known: hips that dip out of the bottom of the
         # frame mid-squat are estimated from the shoulders.
         can_estimate = self.ref_offset is not None and shoulders_y(pts) is not None
-        self.visible = bool(sides) or front or tor is not None or can_estimate
+        self.visible = bool(sides) or front or tor is not None or can_estimate or head_line(pts) is not None
         self.squat_mode = None
+        self.no_signal = None
         if not self.visible:
             return done  # ignore: don't advance or reset any state machine
 
@@ -172,11 +188,20 @@ class RepCounter:
         knee = best(lambda j: angle(pts[j["hip"]], pts[j["knee"]], pts[j["ankle"]]))
         torso_tilt = best(lambda j: tilt_from_horizontal(pts[j["shoulder"]], pts[j["hip"]]))
         knee = self._smooth("squat", knee) if knee is not None and torso_tilt is not None and torso_tilt > 45 else None
-        drop = self._hip_drop(pts, tor, standing=squat.state == "up" and (knee is None or knee > 160))
-        if knee is not None or drop is not None:
-            self.squat_mode = "hip+knee" if (knee is not None and drop is not None) else ("knee" if knee is not None else "hip")
-            is_down = (drop is not None and drop > HIP_DOWN) or (knee is not None and knee < 100)
-            is_up = (drop is None or drop < HIP_UP) and (knee is None or knee > 150)
+        drop = self._hip_drop(pts, tor, standing=squat.state == "up" and (knee is None or knee > 150))
+        head = self._head_drop(pts, standing=squat.state == "up" and (knee is None or knee > 150))
+        self.last_drop, self.last_knee, self.last_head = drop, knee, head
+        # A frame whose torso size looks wrong is noise: skip it entirely unless the head gives a reading.
+        noisy = drop is None and head is None and self.no_signal in ("odd_size", "relearned")
+        if not noisy and (head is not None or knee is not None or drop is not None):
+            self.squat_mode = "+".join(n for n, v in (("head", head), ("hip", drop), ("knee", knee)) if v is not None)
+            # Down: ANY signal sees it (head dropped, hips dropped, or knees bent).
+            is_down = ((head is not None and head > HEAD_DOWN) or (drop is not None and drop > HIP_DOWN)
+                       or (knee is not None and knee < 125))
+            # Up: the head is back near standing (when visible; else the hips), and the knees aren't still bent.
+            # Side-on the hips barely move in the picture, so the knee check stops a count at the bottom.
+            back_up = (head < HEAD_UP) if head is not None else (drop is None or drop < HIP_UP)
+            is_up = back_up and (knee is None or knee > 140)
             if squat.step(0.0, t, is_down=is_down, is_up=is_up):
                 done.append("squat")
 
@@ -196,6 +221,39 @@ class RepCounter:
                 done.append("jumping_jack")
         return done
 
+    def _head_drop(self, pts: list[Point], standing: bool) -> float | None:
+        """Head line drop below standing, in shoulder-widths. Needs the nose and at least one shoulder."""
+        hl = head_line(pts)
+        if hl is None:
+            return None
+        y, width = hl
+        if self.ref_head_y is None:
+            if width:
+                self.ref_head_y, self.ref_head_scale = y, width  # first sighting: assume standing
+            return None
+        if width and self.ref_head_scale and not (RESCALE[0] < width / self.ref_head_scale < RESCALE[1]):
+            # Same protection as the hips: one odd frame is skipped; ~0.5 s of it means they really moved.
+            self.head_out_of_scale += 1
+            if self.head_out_of_scale < RESCALE_FRAMES:
+                self.no_signal = "odd_size"
+                return None
+            self.head_out_of_scale = 0
+            self.ref_head_y, self.ref_head_scale = y, width
+            self.machines["squat"].state = "up"
+            self.no_signal = "relearned"
+            return None
+        self.head_out_of_scale = 0
+        scale = self.ref_head_scale or width
+        if not scale:
+            return None
+        drop = (y - self.ref_head_y) / scale
+        if standing and drop < HEAD_UP:  # learn only while clearly standing
+            a = REF_ALPHA
+            self.ref_head_y = a * y + (1 - a) * self.ref_head_y
+            if width:
+                self.ref_head_scale = a * width + (1 - a) * self.ref_head_scale
+        return self._smooth("squat_head", drop)
+
     def _learn_standing(self, hip_y: float, shoulder_y: float, length: float):
         if self.ref_hip_y is None:
             self.ref_hip_y, self.ref_torso, self.ref_offset = hip_y, length, hip_y - shoulder_y
@@ -211,23 +269,33 @@ class RepCounter:
             hip_y, shoulder_y, length = tor
             tilt = best_tilt(pts)
             if tilt is not None and tilt < 35:
+                self.no_signal = "torso_horizontal"
                 return None  # torso near horizontal: not a squat (push-up position, lying down)
         else:
             # Hips dipped out of the bottom of the frame mid-squat: estimate them from the shoulders.
             sy = shoulders_y(pts)
             if sy is None or self.ref_offset is None:
+                self.no_signal = "no_torso"
                 return None
             hip_y = sy + self.ref_offset
         if self.ref_hip_y is None or not self.ref_torso:
             if tor is not None:
                 self._learn_standing(*tor)  # first sighting: assume standing
+            self.no_signal = "learning"
             return None
         if tor is not None and not (RESCALE[0] < tor[2] / self.ref_torso < RESCALE[1]):
-            # Stepped closer or further away: re-learn where "standing" is, and abandon any half-done rep.
+            self.out_of_scale += 1
+            if self.out_of_scale < RESCALE_FRAMES:
+                self.no_signal = "odd_size"
+                return None  # skip this frame only; keep the standing reference
+            # Stepped closer or further away for real: re-learn where "standing" is, abandon any half-done rep.
+            self.out_of_scale = 0
             self.ref_hip_y = None
             self._learn_standing(*tor)
             self.machines["squat"].state = "up"
+            self.no_signal = "relearned"
             return None
+        self.out_of_scale = 0
         drop = (hip_y - self.ref_hip_y) / self.ref_torso
         if standing and tor is not None and drop < HIP_UP:
             self._learn_standing(*tor)  # only learn while clearly standing, so a slow descent can't drag it down
@@ -241,3 +309,13 @@ def best_tilt(pts: list[Point]) -> float | None:
     """Torso tilt from horizontal using whichever side shows shoulder and hip (90 = upright)."""
     vals = [tilt_from_horizontal(pts[j["shoulder"]], pts[j["hip"]]) for j in SIDES.values() if pts[j["shoulder"]].ok and pts[j["hip"]].ok]
     return sum(vals) / len(vals) if vals else None
+
+
+def head_line(pts: list[Point]) -> tuple[float, float | None] | None:
+    """(height of the nose+shoulders average, shoulder width or None). None if the nose or both shoulders are hidden."""
+    sh = [pts[i] for i in (L_SHOULDER, R_SHOULDER) if pts[i].ok]
+    if not pts[NOSE].ok or not sh:
+        return None
+    y = (pts[NOSE].y + sum(p.y for p in sh)) / (1 + len(sh))
+    width = math.hypot(sh[0].x - sh[1].x, sh[0].y - sh[1].y) if len(sh) == 2 else None
+    return y, (width if width and width > 5 else None)

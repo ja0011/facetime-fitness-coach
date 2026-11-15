@@ -88,8 +88,11 @@ c = run(cycle(side_squat, 80, 175, 5))
 check("5 squats", c.counts()["squat"], 5)
 check("squats don't count as push-ups", c.counts()["pushup"], 0)
 
-c = run(cycle(side_squat, 130, 175, 5))
-check("half squats (never below 100 deg) don't count", c.counts()["squat"], 0)
+c = run(cycle(side_squat, 135, 175, 5))
+check("barely bending (never below 125 deg) doesn't count", c.counts()["squat"], 0)
+
+c = run(cycle(side_squat, 115, 175, 5))
+check("loose: partial squats (115 deg) count", c.counts()["squat"], 5)
 
 frames = cycle(side_squat, 80, 175, 3)
 for i in range(0, len(frames), 3):  # every third frame: person out of frame
@@ -136,10 +139,14 @@ def dips(make, depth, reps, steps=8, stand=6):
 c = run(dips(upper_body, 0.8, 5))
 check("hip mode: 5 waist-up squats", c.counts()["squat"], 5)
 check("hip mode: visible without legs", c.visible, True)
-check("hip mode: mode reported", c.squat_mode, "hip")
+check("waist-up: hip signal in use", "hip" in (c.squat_mode or ""), True)
+check("waist-up: head signal in use", "head" in (c.squat_mode or ""), True)
 
-c = run(dips(upper_body, 0.25, 5))
-check("hip mode: small sways (0.25 torso) don't count", c.counts()["squat"], 0)
+c = run(dips(upper_body, 0.15, 5))
+check("hip mode: small sways (0.15 torso) don't count", c.counts()["squat"], 0)
+
+c = run(dips(upper_body, 0.3, 5))
+check("loose: shallow waist-up squats (0.3 torso) count", c.counts()["squat"], 5)
 
 nods = [upper_body(0.0, nose_dy=40 * math.sin(i / 2)) for i in range(120)]
 check("hip mode: nodding doesn't count", run(nods).counts()["squat"], 0)
@@ -180,10 +187,36 @@ check("facing camera: mode uses hips", "hip" in (c.squat_mode or ""), True)
 c = run(dips(front_squat, 0.45, 5))
 check("facing camera: shallow-ish squats (0.45 torso) count", c.counts()["squat"], 5)
 
-c = run(dips(front_squat, 0.25, 5))
-check("facing camera: sways (0.25 torso) don't count", c.counts()["squat"], 0)
+c = run(dips(front_squat, 0.15, 5))
+check("facing camera: sways (0.15 torso) don't count", c.counts()["squat"], 0)
+
+c = run(dips(front_squat, 0.3, 5))
+check("loose: shallow front squats (0.3 torso) count", c.counts()["squat"], 5)
 
 closer = [front_squat(0.0) for _ in range(10)] + [front_squat(0.0, scale=1.6) for _ in range(20)] + [front_squat(0.0) for _ in range(20)]
 check("stepping closer and back doesn't count", run(closer).counts()["squat"], 0)
+
+# Noisy frames: every 4th frame the torso looks 1.8x bigger (a joint MediaPipe is unsure of). Must not block counting.
+noisy = dips(front_squat, 0.6, 6)
+for i in range(2, len(noisy), 4):
+    noisy[i] = front_squat(0.0, scale=1.8)
+check("noisy torso-size frames don't block counting: 6 squats", run(noisy).counts()["squat"], 6)
+
+# Head only: just nose + shoulders in frame (no hips, no legs). The head line drops ~0.75 shoulder-widths per squat.
+def head_only(drop: float, nose_dy: float = 0.0):
+    p = blank()
+    dy = drop * 100
+    p[NOSE] = Point(500, 100 + dy + nose_dy, True)
+    p[L_SHOULDER], p[R_SHOULDER] = Point(450, 200 + dy, True), Point(550, 200 + dy, True)
+    return p
+
+
+c = run(dips(head_only, 0.75, 5))
+check("head only (nose + shoulders): 5 squats", c.counts()["squat"], 5)
+check("head only: mode is head", c.squat_mode, "head")
+c = run(dips(head_only, 0.3, 5))
+check("head only: small dips (0.3 shoulder-widths) don't count", c.counts()["squat"], 0)
+nods = [head_only(0.0, nose_dy=45 * math.sin(i / 2)) for i in range(120)]
+check("head only: nodding doesn't count", run(nods).counts()["squat"], 0)
 
 sys.exit(1 if failures else 0)
