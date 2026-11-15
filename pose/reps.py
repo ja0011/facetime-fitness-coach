@@ -16,6 +16,7 @@ Squats have two signals feeding ONE state machine (so switching between them can
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass, field
 
 # MediaPipe Pose landmark indices
@@ -34,7 +35,17 @@ SIDES = {
 
 MIN_VISIBILITY = 0.5  # loosened for the demo: use joints MediaPipe is only fairly sure of
 EDGE_MARGIN = 0.0  # loosened: a joint right at the frame edge still counts
-MIN_REP_S = 0.4
+MIN_REP_S = {"squat": 1.0, "pushup": 0.8, "jumping_jack": 0.4}  # a real squat (down AND up) can't take under ~1 s
+MIN_DOWN_S = {"squat": 0.33, "pushup": 0.2, "jumping_jack": 0.0}  # must actually stay down a moment
+# Camera-motion guard: a squat moves you UP/DOWN, but your shoulders stay put left-right and keep their size. If they
+# shift sideways or grow/shrink a lot compared with ~0.5 s ago for several frames in a row, the CAMERA is moving
+# (phone being picked up or propped): stop counting, forget "standing", and wait for the picture to settle.
+MOTION_LOOKBACK_S = 0.5
+MOTION_SHIFT = 0.35      # sideways shift, in shoulder-widths
+MOTION_SCALE = 0.25      # size change (25%)
+MOTION_FRAMES = 3        # consecutive moving frames before it counts as camera motion (1 glitch frame doesn't)
+SETTLE_S = 1.5           # stillness needed after camera motion before counting again
+START_SETTLE_S = 1.0     # stillness needed before the first count
 EMA_ALPHA = 0.5
 
 EXERCISES = ("squat", "pushup", "jumping_jack")
@@ -116,6 +127,7 @@ def full_front(pts: list[Point]) -> bool:
 @dataclass
 class Machine:
     """down_when(value) / up_when(value) drive the up -> down -> up cycle; a rep counts on the return to up."""
+    name: str = "squat"
     count: int = 0
     state: str = "up"
     smoothed: float | None = None
@@ -125,7 +137,8 @@ class Machine:
     def step(self, value: float, t: float, is_down: bool, is_up: bool) -> bool:
         if self.state == "up" and is_down:
             self.state, self.went_down_at = "down", t
-        elif self.state == "down" and is_up and t - self.last_rep_at >= MIN_REP_S:
+        elif (self.state == "down" and is_up and t - self.last_rep_at >= MIN_REP_S.get(self.name, 0.4)
+              and t - self.went_down_at >= MIN_DOWN_S.get(self.name, 0.0)):
             self.state, self.last_rep_at = "up", t
             self.count += 1
             return True
@@ -134,7 +147,10 @@ class Machine:
 
 @dataclass
 class RepCounter:
-    machines: dict[str, Machine] = field(default_factory=lambda: {e: Machine() for e in EXERCISES})
+    machines: dict[str, Machine] = field(default_factory=lambda: {e: Machine(name=e) for e in EXERCISES})
+    frame_hist: deque = field(default_factory=lambda: deque(maxlen=60))  # (t, shoulder centre x, shoulder width)
+    moving_frames: int = 0
+    settle_until: float | None = None
     visible: bool = False
     squat_mode: str | None = None  # "hip+knee", "hip", "knee" or None (which signals this frame had)
     ema: dict[str, float] = field(default_factory=dict)
@@ -172,6 +188,8 @@ class RepCounter:
         self.visible = bool(sides) or front or tor is not None or can_estimate or head_line(pts) is not None
         self.squat_mode = None
         self.no_signal = None
+        if self.visible and self._camera_unsettled(pts, t):
+            return done  # camera moving or settling: don't count anything
         if not self.visible:
             return done  # ignore: don't advance or reset any state machine
 
@@ -253,6 +271,35 @@ class RepCounter:
             if width:
                 self.ref_head_scale = a * width + (1 - a) * self.ref_head_scale
         return self._smooth("squat_head", drop)
+
+    def _camera_unsettled(self, pts: list[Point], t: float) -> bool:
+        """True while the camera is moving or has just stopped (see MOTION_* above)."""
+        if not (pts[L_SHOULDER].ok and pts[R_SHOULDER].ok):
+            return self.settle_until is not None and t < self.settle_until
+        cx = (pts[L_SHOULDER].x + pts[R_SHOULDER].x) / 2
+        w = math.hypot(pts[L_SHOULDER].x - pts[R_SHOULDER].x, pts[L_SHOULDER].y - pts[R_SHOULDER].y)
+        if self.settle_until is None:
+            self.settle_until = t + START_SETTLE_S  # first sighting: learn a steady picture before counting
+        old = next((h for h in self.frame_hist if t - h[0] <= MOTION_LOOKBACK_S + 0.2 and t - h[0] >= MOTION_LOOKBACK_S - 0.2), None)
+        self.frame_hist.append((t, cx, w))
+        if old and w > 5 and old[2] > 5:
+            moved = abs(cx - old[1]) > MOTION_SHIFT * old[2] or abs(w / old[2] - 1) > MOTION_SCALE
+            self.moving_frames = self.moving_frames + 1 if moved else 0
+            if self.moving_frames >= MOTION_FRAMES:
+                self.settle_until = t + SETTLE_S
+                self._forget_standing()
+        if t < self.settle_until:
+            self._forget_standing()  # keep re-learning until the picture is steady
+            self.no_signal = "camera_moving" if self.moving_frames else "settling"
+            return True
+        return False
+
+    def _forget_standing(self):
+        self.ref_hip_y = self.ref_torso = self.ref_offset = None
+        self.ref_head_y = self.ref_head_scale = None
+        self.machines["squat"].state = "up"
+        self.ema.pop("squat_head", None)
+        self.ema.pop("squat_hip", None)
 
     def _learn_standing(self, hip_y: float, shoulder_y: float, length: float):
         if self.ref_hip_y is None:

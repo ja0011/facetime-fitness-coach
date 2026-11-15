@@ -72,7 +72,7 @@ export async function listLines() {
 
 /**
  * Places one outbound FaceTime call and resolves when it is over.
- * @param {{ destination?: string, video?: boolean, onEvent?: (e: object) => void }} [opts]
+ * @param {{ destination?: string, video?: boolean, agentMetadata?: object, onEvent?: (e: object) => void }} [opts]
  * Outcome rule (decides the Solana penalty later):
  *   answered = bridge_ready arrived (they picked up and FaceTime media is up)
  *   missed   = the phone rang (dialing/connecting/active happened) but bridge_ready never came
@@ -81,7 +81,7 @@ export async function listLines() {
  * @returns {Promise<{ outcome: 'answered' | 'missed' | 'error', call_id: string, status: string, terminal_reason: string | null,
  *                     answered_at: string | null, ended_at: string | null }>}
  */
-export async function placeCall({ destination = env('MY_PHONE'), video = true, onEvent = () => {} } = {}) {
+export async function placeCall({ destination = env('MY_PHONE'), video = true, agentMetadata = {}, onEvent = () => {} } = {}) {
   const livekitUrl = env('LIVEKIT_URL');
   const httpUrl = livekitUrl.replace(/^ws/, 'http');
   const apiKey = env('LIVEKIT_API_KEY');
@@ -97,7 +97,8 @@ export async function placeCall({ destination = env('MY_PHONE'), video = true, o
 
   // 1. Room + agent. The room outlives a short empty period so the agent can join before the bridge does.
   await rooms.createRoom({ name: roomName, emptyTimeout: 120, departureTimeout: 20 });
-  await dispatch.createDispatch(roomName, agentName, { metadata: JSON.stringify({ chert_direction: 'outbound' }) });
+  // agentMetadata (e.g. this call's challenge) reaches the coach as ctx.job.metadata.
+  await dispatch.createDispatch(roomName, agentName, { metadata: JSON.stringify({ chert_direction: 'outbound', ...agentMetadata }) });
   onEvent({ type: 'room_ready', room: roomName });
 
   try {

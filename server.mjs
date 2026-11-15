@@ -1,7 +1,10 @@
-// Step-count server: the Apple Shortcut posts today's steps here; if they are under the goal, Chert FaceTimes you.
+// Desk-break server: the Apple Shortcut posts today's step count several times a day (hourly during work hours).
+// If you moved less than INACTIVE_STEPS since the previous report, a call is scheduled at a random time
+// RANDOM_DELAY_MIN..MAX minutes later (WORK_HOURS only), with a random challenge scaled to how little you moved.
 //
-//   POST /steps          { "steps": 4210, "date"?: "2026-11-15", "force"?: true }   force skips the cooldown (demos)
-//   GET  /status         today's steps and every call attempt (or ?date=YYYY-MM-DD)
+//   POST /steps          { "steps": 4210, "date"?, "force"?: true, "challenge"?: "walk"|"squats"|"walk+squats" }
+//                        force skips the cooldown; challenge picks the type instead of random (testing / demos)
+//   GET  /status         last report, next scheduled call, and today's call attempts (or ?date=YYYY-MM-DD)
 //   POST /live-steps     { session_id, steps, started_at }   live count from the StepStream iPhone app (~every 3 s)
 //   GET  /live-steps     latest live count, read by the coach agent during a call
 //   POST /walk-progress  { room, progress, target, completed }   the coach agent's walk progress for the current call
@@ -10,7 +13,8 @@
 // All routes except /health need Authorization: Bearer <STEPS_TOKEN>.
 //
 // data/days.json: { "2026-11-15": { steps, goal, attempts: [ { id, call_id, outcome, walk, penalty, notify, ... } ] } }
-// Outcomes: answered (walk completed) | failed (answered, walk not completed) | missed (rang, not answered)
+// data/activity.json: { last: { at, date, steps }, scheduled: { at, challenge, steps_since, ... } | null }
+// Outcomes: answered (challenge completed) | failed (answered, challenge not completed) | missed (rang, not answered)
 //           | error (never rang: busy line, setup failure). Only missed and failed are charged.
 import { createServer } from 'node:http';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
@@ -18,9 +22,13 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { placeCall } from './outbound.mjs';
 import { applyPenalty, CHARGEABLE } from './penalty.mjs';
+import { DEMO_MODE, describeChallenge, INACTIVE_STEPS, pickChallenge } from './challenge.mjs';
 
 const PORT = Number(process.env.PORT || 3000);
-const STEP_GOAL = Number(process.env.STEP_GOAL || 8000);
+// Inactivity check-ins. DEMO_MODE=1: a 5-20 second delay, work hours ignored, first report of the day counts as inactive.
+const [WORK_START, WORK_END] = (process.env.WORK_HOURS || '9-17').split('-').map(Number);
+const DELAY_MIN_MS = DEMO_MODE ? 5_000 : 60_000 * Number(process.env.RANDOM_DELAY_MIN || 5);
+const DELAY_MAX_MS = DEMO_MODE ? 20_000 : 60_000 * Number(process.env.RANDOM_DELAY_MAX || 30);
 const TOKEN = process.env.STEPS_TOKEN;
 const CALL_COOLDOWN_MS = 60_000 * Number(process.env.CALL_COOLDOWN_MIN ?? 30);
 // Optional daily cap on calls that reach the phone. Unset or 0 = no limit.
@@ -32,13 +40,10 @@ const BUSY_RETRIES = Number(process.env.BUSY_RETRIES ?? 8);
 const BUSY_RETRY_DELAY_MS = 60_000;
 // After the call ends, wait this long for the agent's last walk report before deciding answered vs failed.
 const WALK_REPORT_GRACE_MS = 4000;
-// Rep challenge after the walk (see repchallenge.mjs). 0 = walk only. Must match the agent's .env.local value.
-const REPS_TARGET = Number(process.env.REPS_TARGET ?? 10);
-// 0 = no walk (squats only). Must match the agent's .env.local value.
-const WALK_TARGET = Number(process.env.WALK_TARGET ?? 300);
 // DATA_DIR lets a test run use a throwaway folder instead of ./data.
 const DATA_DIR = process.env.DATA_DIR ? pathToFileURL(process.env.DATA_DIR.replace(/\/?$/, '/')) : new URL('./data/', import.meta.url);
 const STATE_FILE = new URL('days.json', DATA_DIR);
+const ACTIVITY_FILE = new URL('activity.json', DATA_DIR);
 
 if (!TOKEN || TOKEN.length < 16) {
   console.error('STEPS_TOKEN (16+ characters) is missing from .env.local. The server is reachable on your network, so it needs one.');
@@ -184,8 +189,11 @@ async function runCall(date, id) {
   const set = fields => updateAttempt(date, id, fields);
   for (let tryNo = 0; ; tryNo++) {
     try {
+      const a0 = findAttempt(date, id);
       const result = await placeCall({
         video: true,
+        // The coach reads this as ctx.job.metadata: this call's challenge and why it was called.
+        agentMetadata: { challenge: a0.challenge, inactivity: { stepsSince: a0.steps_since ?? null, minutesSince: a0.minutes_since ?? null } },
         onEvent: e => {
           if (e.type === 'room_ready') { roomToAttempt.set(e.room, { date, id }); set({ room: e.room }); }
           if (e.type === 'call_created') { set({ call_id: e.call_id, status_detail: 'dialing' }); log('call created', { date, attempt: id, call_id: e.call_id }); }
@@ -195,7 +203,7 @@ async function runCall(date, id) {
         },
       });
 
-      // Answered is not enough: the walk, then the rep challenge (when REPS_TARGET > 0), must be finished.
+      // Answered is not enough: this call's challenge (walk and/or reps, saved on the attempt) must be finished.
       let outcome = result.outcome;
       let failReason = null;
       let repsUnverified = false;
@@ -207,11 +215,12 @@ async function runCall(date, id) {
         failReason = 'call_dropped';
       }
       if (outcome === 'answered') {
-        const walkDone = () => WALK_TARGET <= 0 || walk?.completed;
-        const done = () => walkDone() && (REPS_TARGET <= 0 || reps?.completed);
+        const ch = findAttempt(date, id).challenge ?? { walk: 0, reps: 0 };
+        const walkDone = () => !(ch.walk > 0) || walk?.completed;
+        const done = () => walkDone() && (!(ch.reps > 0) || reps?.completed);
         if (!done()) { await new Promise(r => setTimeout(r, WALK_REPORT_GRACE_MS)); ({ walk, reps } = findAttempt(date, id)); }
         if (!walkDone()) { outcome = 'failed'; failReason = 'walk'; }
-        else if (REPS_TARGET > 0 && !reps?.completed) {
+        else if (ch.reps > 0 && !reps?.completed) {
           // The rep phase started (the coach reports that at once), but if the pose counter never connected we
           // couldn't count: that's not the caller's fault, so no penalty. Otherwise, unfinished reps = failed.
           if (reps && !reps.counter_seen) repsUnverified = true;
@@ -243,29 +252,99 @@ async function runCall(date, id) {
 }
 
 // ---- routes ----
+// ---- inactivity tracking and the scheduled call ----
+let activity = { last: null, scheduled: null };
+try { activity = { ...activity, ...JSON.parse(await readFile(ACTIVITY_FILE, 'utf8')) }; } catch {}
+async function saveActivity() {
+  await mkdir(DATA_DIR, { recursive: true });
+  const tmp = new URL('activity.json.tmp', DATA_DIR);
+  await writeFile(tmp, JSON.stringify(activity, null, 2));
+  await rename(tmp, ACTIVITY_FILE);
+}
+const inWorkHours = (d = new Date()) => d.getHours() >= WORK_START && d.getHours() < WORK_END;
+let scheduleTimer = null;
+
+function armSchedule() {
+  clearTimeout(scheduleTimer);
+  const sch = activity.scheduled;
+  if (!sch) return;
+  scheduleTimer = setTimeout(() => void fireScheduled(), Math.max(0, Date.parse(sch.at) - Date.now()));
+}
+
+async function fireScheduled() {
+  const sch = activity.scheduled;
+  if (!sch) return;
+  activity.scheduled = null;
+  await saveActivity();
+  if (callInProgress) { log('scheduled call skipped: another call is in progress'); return; }
+  const date = localDate();
+  const attempt = {
+    id: `a-${Date.now()}-${randomUUID().slice(0, 6)}`, started_at: new Date().toISOString(), trigger: 'inactivity',
+    steps_since: sch.steps_since, minutes_since: sch.minutes_since, challenge: sch.challenge, forced: sch.forced, status: 'calling',
+  };
+  day(date).attempts.push(attempt);
+  await saveDays();
+  log('scheduled call firing', { date, attempt: attempt.id, challenge: describeChallenge(sch.challenge) });
+  callInProgress = runCall(date, attempt.id).finally(() => { callInProgress = null; });
+}
+
+// A call scheduled before a restart still happens; one more than 10 minutes overdue is dropped as stale.
+if (activity.scheduled && Date.now() - Date.parse(activity.scheduled.at) > 10 * 60_000) {
+  log('dropping stale scheduled call', { call_at: activity.scheduled.at });
+  activity.scheduled = null;
+  await saveActivity();
+}
+armSchedule();
+
 async function handleSteps(req, res) {
   let body;
   try { body = await readJson(req); } catch { return send(res, 400, { error: 'invalid_json' }); }
   const steps = Number(body.steps);
   if (!Number.isFinite(steps) || steps < 0) return send(res, 400, { error: 'steps must be a non-negative number' });
   const date = /^\d{4}-\d{2}-\d{2}$/.test(body.date || '') ? body.date : localDate();
-  const force = body.force === true; // demos: skip the cooldown (the daily max still applies)
-  const goal = STEP_GOAL;
+  const force = body.force === true; // demos: skip the cooldown
+  const now = new Date();
 
-  log('steps received', { date, steps, goal });
-  await updateDay(date, { steps, goal });
-  if (steps >= goal) return send(res, 200, { status: 'goal_met', date, steps, goal });
+  // Steps since the previous report (the Shortcut sends today's running total).
+  const prev = activity.last;
+  let stepsSince = null;
+  let minutesSince = null;
+  if (prev && prev.date === date) {
+    stepsSince = Math.max(0, steps - prev.steps);
+    minutesSince = Math.round((now - Date.parse(prev.at)) / 60_000);
+  } else if (DEMO_MODE) {
+    stepsSince = 0; // demo: no earlier report today, so this first one counts as inactive
+  }
+  activity.last = { at: now.toISOString(), date, steps };
+  await saveActivity();
+  await updateDay(date, { steps });
+  log('steps received', { date, steps, steps_since: stepsSince, minutes_since: minutesSince, demo: DEMO_MODE });
 
-  if (callInProgress) return send(res, 409, { status: 'call_in_progress', date, steps, goal });
+  const base = { date, steps, steps_since: stepsSince, minutes_since: minutesSince, inactive_below: INACTIVE_STEPS, demo: DEMO_MODE };
+  if (stepsSince == null) return send(res, 200, { status: 'baseline', ...base, note: 'First report today: saved as the starting point.' });
+  if (stepsSince >= INACTIVE_STEPS) return send(res, 200, { status: 'active', ...base });
+  if (!DEMO_MODE && !inWorkHours(now)) return send(res, 200, { status: 'outside_work_hours', ...base, work_hours: `${WORK_START}-${WORK_END}` });
+  if (activity.scheduled) return send(res, 200, { status: 'already_scheduled', ...base, call_at: activity.scheduled.at, challenge: describeChallenge(activity.scheduled.challenge) });
+  if (callInProgress) return send(res, 409, { status: 'call_in_progress', ...base });
   const { callsToday, cooldownUntil } = callBudget(date);
-  if (callsToday >= MAX_CALLS_PER_DAY) return send(res, 200, { status: 'daily_max_reached', date, steps, goal, calls_today: callsToday, max: maxLabel });
-  if (cooldownUntil && !force) return send(res, 200, { status: 'cooldown', date, steps, goal, next_call_after: cooldownUntil });
+  if (callsToday >= MAX_CALLS_PER_DAY) return send(res, 200, { status: 'daily_max_reached', ...base, calls_today: callsToday, max: maxLabel });
+  if (cooldownUntil && !force) return send(res, 200, { status: 'cooldown', ...base, next_call_after: cooldownUntil });
 
-  const attempt = { id: `a-${Date.now()}-${randomUUID().slice(0, 6)}`, started_at: new Date().toISOString(), steps_at_trigger: steps, forced: force, status: 'calling' };
-  day(date).attempts.push(attempt);
-  await saveDays();
-  callInProgress = runCall(date, attempt.id).finally(() => { callInProgress = null; });
-  return send(res, 202, { status: 'calling', date, steps, goal, short_by: goal - steps, attempt_id: attempt.id, calls_today: callsToday + 1, max: maxLabel });
+  // Inactive: pick the challenge now (scaled to how little they moved) and call at a random time soon.
+  // Optional "challenge": "walk" | "squats" | "walk+squats" (testing / demos); otherwise random.
+  const challenge = pickChallenge({ stepsSince, kind: typeof body.challenge === 'string' ? body.challenge.toLowerCase() : null });
+  const delayMs = Math.round(DELAY_MIN_MS + Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS));
+  // The delay counts from NOW (after any slow saves above), not from when the request arrived, and the timer is
+  // armed before saving: a file save stalled by iCloud Desktop sync once made a "13 s" call fire immediately.
+  const at = new Date(Date.now() + delayMs).toISOString();
+  activity.scheduled = { at, date, steps_since: stepsSince, minutes_since: minutesSince, challenge, forced: force, created_at: new Date().toISOString() };
+  armSchedule();
+  const saveStart = Date.now();
+  await saveActivity();
+  // call_at, not "at": log() puts its own timestamp in "at", and a second "at" would overwrite it.
+  log('call scheduled', { call_at: at, in_seconds: Math.round(delayMs / 1000), challenge: describeChallenge(challenge), steps_since: stepsSince,
+    request_ms: Date.now() - now.getTime(), save_ms: Date.now() - saveStart });
+  return send(res, 202, { status: 'scheduled', ...base, call_at: at, in_seconds: Math.round(delayMs / 1000), challenge: describeChallenge(challenge) });
 }
 
 async function handlePenaltyRetry(body) {
@@ -304,8 +383,12 @@ const server = createServer(async (req, res) => {
       const date = url.searchParams.get('date') || localDate();
       const rec = days[date] ?? { attempts: [] };
       const { callsToday, cooldownUntil } = callBudget(date);
+      const sch = activity.scheduled;
       return send(res, 200, {
-        date, goal: STEP_GOAL, steps: rec.steps ?? null, calling: Boolean(callInProgress),
+        date, steps: rec.steps ?? null, calling: Boolean(callInProgress), demo_mode: DEMO_MODE,
+        last_report: activity.last,
+        next_call: sch ? { at: sch.at, in_seconds: Math.max(0, Math.round((Date.parse(sch.at) - Date.now()) / 1000)), challenge: describeChallenge(sch.challenge), steps_since: sch.steps_since } : null,
+        inactive_below: INACTIVE_STEPS, work_hours: DEMO_MODE ? 'ignored (demo)' : `${WORK_START}-${WORK_END}`,
         calls_today: callsToday, max_calls_per_day: maxLabel, cooldown_until: cooldownUntil,
         attempts: rec.attempts,
       });
@@ -317,4 +400,5 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => log('step server listening', { port: PORT, goal: STEP_GOAL, cooldown_min: CALL_COOLDOWN_MS / 60_000, max_calls_per_day: maxLabel }));
+server.listen(PORT, '0.0.0.0', () => log('step server listening', { port: PORT, demo: DEMO_MODE, inactive_below: INACTIVE_STEPS,
+  work_hours: DEMO_MODE ? 'ignored' : `${WORK_START}-${WORK_END}`, delay_s: [DELAY_MIN_MS / 1000, DELAY_MAX_MS / 1000], cooldown_min: CALL_COOLDOWN_MS / 60_000 }));

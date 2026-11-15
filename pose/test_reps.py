@@ -59,8 +59,11 @@ def front_jack(arms_up: bool):
     return p
 
 
-def run(frames, fps=15):
+def run(frames, fps=15, settle=True):
+    """Feed frames; by default start with ~1.3 s of the first pose held still (the counter waits for a steady picture)."""
     c = RepCounter()
+    if settle and frames:
+        frames = [frames[0]] * 20 + list(frames)
     for i, f in enumerate(frames):
         c.update(f, i / fps)
     return c
@@ -218,5 +221,32 @@ c = run(dips(head_only, 0.3, 5))
 check("head only: small dips (0.3 shoulder-widths) don't count", c.counts()["squat"], 0)
 nods = [head_only(0.0, nose_dy=45 * math.sin(i / 2)) for i in range(120)]
 check("head only: nodding doesn't count", run(nods).counts()["squat"], 0)
+
+# ---- camera motion (phone being picked up / propped) must never count ----
+import random  # noqa: E402
+random.seed(7)
+
+
+def moved(p, dx=0.0, dy=0.0, scale=1.0):
+    return [Point(500 + (q.x - 500) * scale + dx, 400 + (q.y - 400) * scale + dy, q.ok) for q in p]
+
+
+# 3 s of the phone being handled: picture drifts and jumps sideways/up-down and zooms in and out.
+handled, x, y, z = [], 0.0, 0.0, 1.0
+for i in range(45):
+    x += random.uniform(-60, 60); y += random.uniform(-80, 80); z = min(1.6, max(0.6, z * random.uniform(0.85, 1.18)))
+    handled.append(moved(front_squat(0.0), x, y, z))
+check("phone being handled for 3 s: 0 squats", run(handled).counts()["squat"], 0)
+
+# Handling, then set down and real squats: only the real ones count.
+c = run(handled + [front_squat(0.0)] * 30 + dips(front_squat, 0.6, 4))
+check("handled, then propped, then 4 real squats: 4", c.counts()["squat"], 4)
+
+# Too fast to be real: up-down cycles of 0.4 s.
+fast = []
+for _ in range(8):
+    fast += [front_squat(0.7)] * 3 + [front_squat(0.0)] * 3
+n_fast = run(fast).counts()["squat"]
+check("8 bobs in 3.2 s count at most 1 per second (<= 3)", n_fast <= 3, True)
 
 sys.exit(1 if failures else 0)

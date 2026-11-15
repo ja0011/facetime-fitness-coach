@@ -20,8 +20,7 @@ const NO_COUNTER_MS = 12_000; // no message from the pose worker this long after
  * start() is called after the walk.
  * @param {{ room: any, session: any, report: (reps: object) => Promise<void> | void, log?: Function }} opts
  */
-export function createRepChallenge({ room, session, report, log = () => {} }) {
-  const exercise = REPS_EXERCISE;
+export function createRepChallenge({ room, session, report, target = REPS_TARGET, exercise = REPS_EXERCISE, log = () => {} }) {
   const words = EXERCISE_WORDS[exercise];
   let latest = null; // { counts, visible, at }
   let counterSeen = false;
@@ -40,7 +39,7 @@ export function createRepChallenge({ room, session, report, log = () => {} }) {
   const progress = () => Math.max(0, (latest?.counts?.[exercise] ?? baseline) - baseline);
 
   function send() {
-    const reps = { exercise, target: REPS_TARGET, progress: progress(), completed: finished, counter_seen: counterSeen, started };
+    const reps = { exercise, target: target, progress: progress(), completed: finished, counter_seen: counterSeen, started };
     const key = JSON.stringify(reps);
     if (key === lastReported) return;
     lastReported = key;
@@ -77,32 +76,36 @@ export function createRepChallenge({ room, session, report, log = () => {} }) {
         : 'In one short sentence, ask the caller to prop the phone up and step back until their whole body, head to feet, is in the frame, so you can count their reps.');
     }
 
-    if (n >= REPS_TARGET) {
+    if (n >= target) {
       if (!quiet()) return; // celebrate on the next message, once nobody is talking
       finished = true;
       send();
       log('reps: target reached', { exercise, progress: n });
-      say(`Celebrate: the caller just finished all ${REPS_TARGET} ${words}. Then wrap up the call warmly in one sentence. Use exactly these numbers.`);
+      say(`Celebrate: the caller just finished all ${target} ${words}. Then wrap up the call warmly in one sentence. Use exactly these numbers.`);
       return;
     }
     send();
     // "7... 8...": call out the newest rep when nobody is talking. If we're mid-sentence, the next rep carries the newer number.
     if (n > lastCalled && now - lastCalloutAt >= CALLOUT_MIN_GAP_MS && quiet()) {
+      // Catch up out loud if reps happened while the coach was talking ("2, 3, 4!"), so no number goes unsaid.
+      // Capped at the last 4 numbers so a big jump stays short.
+      const from = Math.max(lastCalled + 1, n - 3);
+      const nums = Array.from({ length: n - from + 1 }, (_, i) => from + i).join(', ');
       lastCalled = n;
       lastCalloutAt = now;
-      log('reps: callout', { n }); // every number the coach is told to say comes from the pose counter
-      const left = REPS_TARGET - n;
-      say(left <= 2
-        ? `REP COUNT from the counter: ${n}. Say only "${n}!" and then "${left} more!" Nothing else.`
-        : `REP COUNT from the counter: ${n}. Say only the number "${n}", energetically. Nothing else.`);
+      log('reps: callout', { n, said: nums }); // every number the coach is told to say comes from the pose counter
+      const left = target - n;
+      say(left <= 2 && left > 0
+        ? `REP COUNT from the counter: ${n}. Say only "${nums}!" and then "${left} more!" quickly. Nothing else.`
+        : `REP COUNT from the counter: ${n}. Say only "${nums}!" quickly and energetically. Nothing else.`);
     }
   }
 
   return {
     exercise,
-    target: REPS_TARGET,
+    target,
     start() {
-      if (started || REPS_TARGET <= 0) return;
+      if (started || target <= 0) return;
       // Never send Gemini a new request while it is still talking (greeting, walk celebration): wait for a quiet
       // moment, up to 10 s. A request on top of an active response is the likely trigger of the Gemini Live
       // "CONTENT_TYPE_AUDIO is not supported" crash that ended a call.
@@ -117,9 +120,9 @@ export function createRepChallenge({ room, session, report, log = () => {} }) {
     _begin() {
       started = Date.now();
       baseline = latest?.counts?.[exercise] ?? 0; // reps done before the challenge don't count
-      log('reps: challenge started', { exercise, target: REPS_TARGET, baseline, counter_seen: counterSeen });
+      log('reps: challenge started', { exercise, target: target, baseline, counter_seen: counterSeen });
       send(); // tells the server the rep phase began (so a hang-up now is "failed", not a free pass)
-      say(`In one or two short sentences: next challenge, ${REPS_TARGET} ${words}. Ask them to prop the phone up and step back so you can see ${exercise === 'squat' ? 'at least head to hips (head to feet is best)' : 'their whole body, head to feet'}, then say go. Tell them a rep counter is watching and you will call out each number as it counts. Do NOT count reps yourself and do not say any rep numbers now.`);
+      say(`In ONE short sentence: "${target} ${words}: prop the phone up so I can see you${exercise === 'squat' ? ' from the head down' : ' head to toe'}, and go!" Do NOT count reps yourself and do not say any rep numbers now.`);
       timer = setInterval(tick, 1000);
     },
     stop() {

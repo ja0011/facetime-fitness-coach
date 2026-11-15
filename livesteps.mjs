@@ -19,12 +19,13 @@ const NUDGE_EVERY_MS = 45_000; // repeat "open StepStream" at most this often
 export const WALK_TARGET = Number(process.env.WALK_TARGET ?? 300);
 
 /**
- * @param {{ session: any, callStart: number, room?: string, onComplete?: () => void, log?: (msg: string, extra?: object) => void }} opts
+ * @param {{ session: any, callStart: number, room?: string, onComplete?: () => void, target?: number, log?: (msg: string, extra?: object) => void }} opts
+ *   target: steps for this call (from the call's challenge); defaults to WALK_TARGET.
  *   onComplete: called once when the walk target is reached (the rep challenge starts from here).
  *   room: the LiveKit room name, so server.mjs can attach walk progress to the right call (answered vs failed).
  * @returns {() => void} stop
  */
-export function startWalkChallenge({ session, callStart, room, onComplete, log = () => {} }) {
+export function startWalkChallenge({ session, callStart, room, onComplete, target = WALK_TARGET, log = () => {} }) {
   const base = process.env.LIVE_STEPS_URL || `http://127.0.0.1:${process.env.PORT || 3000}`;
   const url = `${base}/live-steps`;
   const token = process.env.STEPS_TOKEN;
@@ -55,10 +56,10 @@ export function startWalkChallenge({ session, callStart, room, onComplete, log =
     celebrate.said = true;
     log('walk: celebrating', { progress: celebrate.progress });
     if (onComplete) {
-      say(`In one short sentence, celebrate: the caller just hit ${celebrate.progress} steps and completed the ${WALK_TARGET}-step walk. Use exactly these numbers. Do not wrap up: there is one more challenge.`);
+      say(`In one short sentence, celebrate: the caller just hit ${celebrate.progress} steps and completed the ${target}-step walk. Use exactly these numbers. Do not wrap up: there is one more challenge.`);
       setTimeout(fireComplete, 4000); // let the celebration play before the next challenge starts
     } else {
-      say(`Celebrate briefly: the caller just hit ${celebrate.progress} steps and completed the ${WALK_TARGET}-step walking challenge. Then wrap up warmly in one sentence. Use exactly these numbers.`);
+      say(`Celebrate briefly: the caller just hit ${celebrate.progress} steps and completed the ${target}-step walking challenge. Then wrap up warmly in one sentence. Use exactly these numbers.`);
     }
   }
   let wasStale = true;
@@ -84,7 +85,7 @@ export function startWalkChallenge({ session, callStart, room, onComplete, log =
       const res = await fetch(`${base}/walk-progress`, {
         method: 'POST',
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ room, progress, target: WALK_TARGET, completed }),
+        body: JSON.stringify({ room, progress, target: target, completed }),
         signal: AbortSignal.timeout(1500),
       });
       lastReported = progress; reportedDone = completed;
@@ -120,10 +121,10 @@ export function startWalkChallenge({ session, callStart, room, onComplete, log =
       log('walk: tracking session', { started_during_call: startedDuringCall });
     }
     const progress = Math.max(0, liveRec.steps - baseline.steps);
-    const left = Math.max(0, WALK_TARGET - progress);
-    await report(progress, progress >= WALK_TARGET);
+    const left = Math.max(0, target - progress);
+    await report(progress, progress >= target);
 
-    if (!finished && progress >= WALK_TARGET) {
+    if (!finished && progress >= target) {
       finished = true; // lock it in now; the celebration and hand-over happen in finishUp()
       celebrate = { progress, at: now };
       log('walk: target reached', { progress });
